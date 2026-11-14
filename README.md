@@ -1,47 +1,50 @@
 # presswork
 
-A drop-in replacement for [wkhtmltopdf](https://wkhtmltopdf.org/): same
-command-line interface, modern CSS, secure by default.
+An HTML to PDF converter for documents such as invoices, reports and
+certificates, written in Rust with no browser dependency. It aims to be a
+replacement for [wkhtmltopdf](https://wkhtmltopdf.org/), which is no longer
+maintained, and accepts the same command line.
 
-wkhtmltopdf is no longer maintained, yet many applications still call it
-directly or through wrappers such as `pdfkit`, `wicked_pdf` and `snappy`.
-presswork aims to let those codebases switch by replacing a single binary,
-without rewriting their PDF generation.
+> **Status: early development. presswork does not produce PDFs yet.**
+> The command line works; the rendering engine does not exist yet.
 
-Under the hood it is a fast, Chrome-free HTML/CSS to PDF engine written in
-Rust, built for documents: invoices, reports, certificates and books.
+## What works today
 
-> **Status:** early development. The pipeline is scaffolded; rendering is not
-> implemented yet.
+- **wkhtmltopdf's command line.** Every documented wkhtmltopdf 0.12.6 option
+  is recognised, so invocations from wrapper libraries such as `pdfkit`,
+  `wicked_pdf` and `snappy` parse:
+  - `-` reads HTML from standard input or writes the PDF to standard output.
+  - `-q` / `--quiet` and `--log-level none` silence warnings.
+  - `file://` input URLs are accepted.
+  - Options that are not implemented yet are ignored with a warning.
+    Options unknown to wkhtmltopdf are rejected, as wkhtmltopdf does.
+- **Page options.** `-s` / `--page-size` accepts every size wkhtmltopdf does
+  (A0–A9, B0–B10, C5E, Comm10E, DLE, Executive, Folio, Ledger, Legal, Letter,
+  Tabloid). `-O` / `--orientation` and `--title` are also supported.
 
-## Goals
+Running a conversion currently ends with
+`Error: rendering is not implemented yet`.
 
-- **wkhtmltopdf compatible.** Accept the same command-line flags and produce
-  equivalent output, so existing scripts and wrapper libraries keep working.
-- **No browser dependency.** A single static binary with its own layout engine.
-- **Print first.** First-class support for CSS Paged Media: `@page` rules,
-  margin boxes, page counters, running headers and generated tables of contents.
-- **Modern CSS for documents.** Block, inline, tables, flexbox and grid.
-- **Safe by default.** No JavaScript execution, and no network or local file
-  access unless explicitly allowed.
+## Usage
 
-Out of scope for now: JavaScript, interactive content, screen media.
-
-## Architecture
-
-```
-HTML ─► dom ─► style ─► layout ─► paint ─► PDF
-               (cascade) (boxes,   (fragment
-                          pages)    tree → PDF)
+```sh
+presswork [OPTIONS] <INPUT> <OUTPUT>
+presswork --page-size Letter invoice.html invoice.pdf
+cat invoice.html | presswork --quiet - - > invoice.pdf
 ```
 
-| Crate                         | Responsibility                                          |
-| ----------------------------- | ------------------------------------------------------- |
-| [`dom`](crates/dom)           | HTML parsing into an arena-allocated document tree       |
-| [`style`](crates/style)       | CSS parsing, selector matching, cascade, computed values |
-| [`layout`](crates/layout)     | Box tree, block/inline/table/flex/grid layout, pagination |
-| [`paint`](crates/paint)       | Fragment tree to PDF: text, graphics, links, outline     |
-| [`cli`](crates/cli)           | The `presswork` command-line tool                        |
+## Differences from wkhtmltopdf
+
+- **No JavaScript.** `--javascript-delay`, `--window-status` and
+  `--run-script` have no effect. Render dynamic content on the server first.
+- **No network access.** Documents are not fetched from `http(s)://` URLs.
+  Local and network resources referenced by a document will only load when
+  explicitly allowed.
+- **Standards-based layout.** Output follows the CSS specifications, not
+  QtWebKit, so templates tuned for wkhtmltopdf's rendering (for example its
+  smart shrinking) may lay out differently.
+- **One input document.** Multiple inputs, cover pages and `toc` objects are
+  not supported yet.
 
 ## Building
 
@@ -52,33 +55,15 @@ cargo build --release
 cargo test --workspace
 ```
 
-## Usage
+## License
 
-```sh
-presswork input.html output.pdf --page-size A4 --orientation portrait
-```
+Licensed under either of
 
-## Migrating from wkhtmltopdf
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-presswork uses the same argument order and flag names as wkhtmltopdf, so in
-most cases migrating means pointing your scripts or wrapper library at the
-`presswork` binary instead.
+at your option.
 
-Flags accepted today:
-
-| wkhtmltopdf flag                         | Status   |
-| ---------------------------------------- | -------- |
-| `-s`, `--page-size <A3\|A4\|A5\|Letter\|Legal>` | Accepted |
-| `-O`, `--orientation <Portrait\|Landscape>`  | Accepted |
-| `--title <text>`                         | Accepted |
-
-Known differences:
-
-- **No JavaScript.** Pages are rendered as static HTML/CSS, so
-  `--javascript-delay`, `--window-status` and `--run-script` have no effect.
-  Render dynamic content on the server before converting.
-- **Standards-based layout.** Output follows the CSS specifications rather
-  than QtWebKit's rendering, so pages that relied on old WebKit quirks may
-  look slightly different.
-- **Restricted resource access by default.** Local files and network
-  resources are not loaded unless explicitly allowed.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
