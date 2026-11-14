@@ -1,0 +1,12 @@
+[package]
+name = "presswork-layout"
+description = "Box tree construction, layout and pagination for the presswork engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

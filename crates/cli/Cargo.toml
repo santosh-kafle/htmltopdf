@@ -1,0 +1,20 @@
+[package]
+name = "presswork-cli"
+description = "Command-line interface for the presswork engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "presswork"
+path = "src/main.rs"
+
+[dependencies]
+presswork-layout.workspace = true
+presswork-paint.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

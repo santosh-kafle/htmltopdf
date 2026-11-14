@@ -1,0 +1,35 @@
+# Rust build output
+/target/
+
+# Generated output from local runs and tests
+*.pdf
+!tests/fixtures/**/*.pdf
+/out/
+
+# Rendering test artifacts (diff images, actual output)
+/tests/output/
+*.actual.png
+*.diff.png
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / local config
+.env
+.env.*
+
+# Profiling
+perf.data*
+flamegraph.svg
+
+# Claude Code (local only)
+CLAUDE.md
+.claude/

@@ -1,0 +1,13 @@
+[package]
+name = "presswork-paint"
+description = "PDF output for the presswork engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+presswork-layout.workspace = true
+
+[lints]
+workspace = true
