@@ -16,7 +16,9 @@ presswork-paint = { path = "crates/paint" }
 
 # External crates
 anyhow = "1"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+regex = "1"
+url = "2.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

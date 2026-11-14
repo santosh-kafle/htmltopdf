@@ -6,7 +6,8 @@
 //! every documented wkhtmltopdf option is recognised here: options presswork
 //! supports are passed through to clap, options whose behavior presswork
 //! already matches are dropped silently, and the rest are dropped with a
-//! warning. Options wkhtmltopdf itself does not know are left for clap to
+//! warning. Unsupported options that change the output are reported even
+//! under `--quiet`, since pdfkit passes `--quiet` by default. Options wkhtmltopdf itself does not know are left for clap to
 //! reject, as wkhtmltopdf would.
 
 use std::ffi::OsString;
@@ -22,11 +23,19 @@ enum Kind {
     LogLevel,
     /// presswork already behaves this way; dropped silently with its values.
     Accept(usize),
-    /// Not implemented yet; dropped with a warning, along with its values.
+    /// `--version`: prints a wkhtmltopdf-style version line.
+    Version,
+    /// Not implemented yet, but only affects things presswork does not do
+    /// anyway (fetching, links, outline); dropped with a warning that
+    /// `--quiet` silences, along with its values.
     Ignore(usize),
+    /// Not implemented yet and changes what ends up on the page (margins,
+    /// headers, footers, page size, ...); dropped with a warning that
+    /// `--quiet` does not silence, or an error in strict mode.
+    Lossy(usize),
 }
 
-use Kind::{Accept, Help, Ignore, LogLevel, Pass};
+use Kind::{Accept, Help, Ignore, LogLevel, Lossy, Pass, Version};
 
 /// Every wkhtmltopdf 0.12.6 option: long name, short alias, handling.
 const OPTIONS: &[(&str, Option<char>, Kind)] = &[
@@ -36,7 +45,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("title", None, Pass(1)),
     ("quiet", Some('q'), Pass(0)),
     ("help", Some('h'), Pass(0)),
-    ("version", Some('V'), Pass(0)),
+    ("version", Some('V'), Version),
     ("extended-help", Some('H'), Help),
     ("log-level", None, LogLevel),
     // Already the default behavior: no JavaScript, no plugins, no local
@@ -47,28 +56,30 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("print-media-type", None, Accept(0)),
     ("no-debug-javascript", None, Accept(0)),
     ("stop-slow-scripts", None, Accept(0)),
+    // presswork never shrinks content to fit, which is what this asks for.
+    ("disable-smart-shrinking", None, Accept(0)),
     ("no-stop-slow-scripts", None, Accept(0)),
     // Global options.
     ("collate", None, Ignore(0)),
     ("no-collate", None, Ignore(0)),
     ("cookie-jar", None, Ignore(1)),
-    ("copies", None, Ignore(1)),
-    ("dpi", Some('d'), Ignore(1)),
-    ("grayscale", Some('g'), Ignore(0)),
+    ("copies", None, Lossy(1)),
+    ("dpi", Some('d'), Lossy(1)),
+    ("grayscale", Some('g'), Lossy(0)),
     ("htmldoc", None, Ignore(0)),
     ("image-dpi", None, Ignore(1)),
     ("image-quality", None, Ignore(1)),
     ("license", None, Ignore(0)),
     ("lowquality", Some('l'), Ignore(0)),
     ("manpage", None, Ignore(0)),
-    ("margin-bottom", Some('B'), Ignore(1)),
-    ("margin-left", Some('L'), Ignore(1)),
-    ("margin-right", Some('R'), Ignore(1)),
-    ("margin-top", Some('T'), Ignore(1)),
-    ("page-height", None, Ignore(1)),
-    ("page-width", None, Ignore(1)),
+    ("margin-bottom", Some('B'), Lossy(1)),
+    ("margin-left", Some('L'), Lossy(1)),
+    ("margin-right", Some('R'), Lossy(1)),
+    ("margin-top", Some('T'), Lossy(1)),
+    ("page-height", None, Lossy(1)),
+    ("page-width", None, Lossy(1)),
     ("no-pdf-compression", None, Ignore(0)),
-    ("read-args-from-stdin", None, Ignore(0)),
+    ("read-args-from-stdin", None, Lossy(0)),
     ("readme", None, Ignore(0)),
     ("use-xserver", None, Ignore(0)),
     // Outline options.
@@ -78,9 +89,9 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("no-outline", None, Ignore(0)),
     ("outline-depth", None, Ignore(1)),
     // Page options.
-    ("allow", None, Ignore(1)),
+    ("allow", None, Lossy(1)),
     ("background", None, Ignore(0)),
-    ("no-background", None, Ignore(0)),
+    ("no-background", None, Lossy(0)),
     ("bypass-proxy-for", None, Ignore(1)),
     ("cache-dir", None, Ignore(1)),
     ("checkbox-checked-svg", None, Ignore(1)),
@@ -90,69 +101,72 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("custom-header-propagation", None, Ignore(0)),
     ("no-custom-header-propagation", None, Ignore(0)),
     ("debug-javascript", None, Ignore(0)),
-    ("default-header", None, Ignore(0)),
-    ("encoding", None, Ignore(1)),
+    ("default-header", None, Lossy(0)),
+    ("encoding", None, Lossy(1)),
     ("disable-external-links", None, Ignore(0)),
     ("enable-external-links", None, Ignore(0)),
     ("disable-forms", None, Ignore(0)),
     ("enable-forms", None, Ignore(0)),
     ("images", None, Ignore(0)),
-    ("no-images", None, Ignore(0)),
+    ("no-images", None, Lossy(0)),
     ("disable-internal-links", None, Ignore(0)),
     ("enable-internal-links", None, Ignore(0)),
-    ("enable-javascript", None, Ignore(0)),
-    ("javascript-delay", None, Ignore(1)),
+    ("enable-javascript", None, Lossy(0)),
+    ("javascript-delay", None, Lossy(1)),
     ("keep-relative-links", None, Ignore(0)),
     ("load-error-handling", None, Ignore(1)),
     ("load-media-error-handling", None, Ignore(1)),
-    ("enable-local-file-access", None, Ignore(0)),
-    ("minimum-font-size", None, Ignore(1)),
+    ("enable-local-file-access", None, Lossy(0)),
+    ("minimum-font-size", None, Lossy(1)),
     ("exclude-from-outline", None, Ignore(0)),
     ("include-in-outline", None, Ignore(0)),
-    ("page-offset", None, Ignore(1)),
+    ("page-offset", None, Lossy(1)),
     ("password", None, Ignore(1)),
     ("enable-plugins", None, Ignore(0)),
     ("post", None, Ignore(2)),
     ("post-file", None, Ignore(2)),
-    ("no-print-media-type", None, Ignore(0)),
+    ("no-print-media-type", None, Lossy(0)),
     ("proxy", Some('p'), Ignore(1)),
     ("proxy-hostname-lookup", None, Ignore(0)),
     ("radiobutton-checked-svg", None, Ignore(1)),
     ("radiobutton-svg", None, Ignore(1)),
     ("resolve-relative-links", None, Ignore(0)),
-    ("run-script", None, Ignore(1)),
-    ("disable-smart-shrinking", None, Ignore(0)),
-    ("enable-smart-shrinking", None, Ignore(0)),
+    ("run-script", None, Lossy(1)),
+    ("enable-smart-shrinking", None, Lossy(0)),
     ("ssl-crt-path", None, Ignore(1)),
     ("ssl-key-password", None, Ignore(1)),
     ("ssl-key-path", None, Ignore(1)),
     ("disable-toc-back-links", None, Ignore(0)),
     ("enable-toc-back-links", None, Ignore(0)),
-    ("user-style-sheet", None, Ignore(1)),
+    ("user-style-sheet", None, Lossy(1)),
     ("username", None, Ignore(1)),
-    ("viewport-size", None, Ignore(1)),
-    ("window-status", None, Ignore(1)),
-    ("zoom", None, Ignore(1)),
+    ("viewport-size", None, Lossy(1)),
+    ("window-status", None, Lossy(1)),
+    ("zoom", None, Lossy(1)),
     // Header and footer options.
-    ("footer-center", None, Ignore(1)),
-    ("footer-font-name", None, Ignore(1)),
-    ("footer-font-size", None, Ignore(1)),
-    ("footer-html", None, Ignore(1)),
-    ("footer-left", None, Ignore(1)),
-    ("footer-line", None, Ignore(0)),
-    ("no-footer-line", None, Ignore(0)),
-    ("footer-right", None, Ignore(1)),
-    ("footer-spacing", None, Ignore(1)),
-    ("header-center", None, Ignore(1)),
-    ("header-font-name", None, Ignore(1)),
-    ("header-font-size", None, Ignore(1)),
-    ("header-html", None, Ignore(1)),
-    ("header-left", None, Ignore(1)),
-    ("header-line", None, Ignore(0)),
-    ("no-header-line", None, Ignore(0)),
-    ("header-right", None, Ignore(1)),
-    ("header-spacing", None, Ignore(1)),
-    ("replace", None, Ignore(2)),
+    ("footer-center", None, Lossy(1)),
+    ("footer-font-name", None, Lossy(1)),
+    ("footer-font-size", None, Lossy(1)),
+    ("footer-html", None, Lossy(1)),
+    ("footer-left", None, Lossy(1)),
+    ("footer-line", None, Lossy(0)),
+    ("no-footer-line", None, Lossy(0)),
+    ("footer-right", None, Lossy(1)),
+    ("footer-spacing", None, Lossy(1)),
+    ("header-center", None, Lossy(1)),
+    ("header-font-name", None, Lossy(1)),
+    ("header-font-size", None, Lossy(1)),
+    ("header-html", None, Lossy(1)),
+    ("header-left", None, Lossy(1)),
+    ("header-line", None, Lossy(0)),
+    ("no-header-line", None, Lossy(0)),
+    ("header-right", None, Lossy(1)),
+    ("header-spacing", None, Lossy(1)),
+    ("replace", None, Lossy(2)),
+    // wkhtmltopdf 0.9 spelled the TOC and cover objects as options. wicked_pdf
+    // still sends these when it cannot detect a 0.12 binary.
+    ("toc", None, Lossy(0)),
+    ("cover", None, Lossy(1)),
     // Table of contents options.
     ("disable-dotted-lines", None, Ignore(0)),
     ("toc-header-text", None, Ignore(1)),
@@ -167,9 +181,12 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
 pub struct Normalized {
     /// Arguments to hand to clap, including the program name.
     pub args: Vec<OsString>,
-    /// Options and objects that were dropped because presswork does not
-    /// support them yet, as the user spelled them.
+    /// Dropped options that do not change the output, as spelled.
     pub ignored: Vec<String>,
+    /// Dropped options and objects that change the output, as spelled.
+    pub lossy: Vec<String>,
+    /// `-V` / `--version` was given.
+    pub version: bool,
 }
 
 fn lookup(arg: &str) -> Option<Kind> {
@@ -222,9 +239,9 @@ where
             match text.as_str() {
                 // `page <input>` is the explicit form of a plain input.
                 "page" => {}
-                "toc" => out.ignored.push(text),
+                "toc" => out.lossy.push(text),
                 "cover" => {
-                    out.ignored.push(text);
+                    out.lossy.push(text);
                     args.next();
                 }
                 _ => out.args.push(arg),
@@ -246,6 +263,7 @@ where
                 out.args.extend(args.by_ref().take(values(n)));
             }
             Some(Help) => out.args.push("--help".into()),
+            Some(Version) => out.version = true,
             Some(LogLevel) => {
                 let level = match inline_value {
                     Some(value) => Some(OsString::from(value)),
@@ -262,6 +280,10 @@ where
                 out.ignored.push(name.to_owned());
                 args.by_ref().take(values(n)).for_each(drop);
             }
+            Some(Lossy(n)) => {
+                out.lossy.push(name.to_owned());
+                args.by_ref().take(values(n)).for_each(drop);
+            }
             // Unknown to wkhtmltopdf as well: let clap report it.
             None => out.args.push(arg),
         }
@@ -274,15 +296,26 @@ where
 mod tests {
     use super::*;
 
-    fn run(args: &[&str]) -> (Vec<String>, Vec<String>) {
+    struct Run {
+        args: Vec<String>,
+        ignored: Vec<String>,
+        lossy: Vec<String>,
+        version: bool,
+    }
+
+    fn run(args: &[&str]) -> Run {
         let n = normalize(std::iter::once("presswork").chain(args.iter().copied()));
-        let args = n
-            .args
-            .into_iter()
-            .skip(1)
-            .map(|a| a.into_string().unwrap())
-            .collect();
-        (args, n.ignored)
+        Run {
+            args: n
+                .args
+                .into_iter()
+                .skip(1)
+                .map(|a| a.into_string().unwrap())
+                .collect(),
+            ignored: n.ignored,
+            lossy: n.lossy,
+            version: n.version,
+        }
     }
 
     #[test]
@@ -299,7 +332,7 @@ mod tests {
 
     #[test]
     fn drops_unsupported_options_with_their_values() {
-        let (args, ignored) = run(&[
+        let r = run(&[
             "--margin-top",
             "10mm",
             "-L",
@@ -307,61 +340,86 @@ mod tests {
             "--cookie",
             "name",
             "value",
-            "--grayscale",
+            "--outline",
+            "--footer-right",
+            "[page]",
             "in.html",
             "out.pdf",
         ]);
-        assert_eq!(args, ["in.html", "out.pdf"]);
-        assert_eq!(ignored, ["--margin-top", "-L", "--cookie", "--grayscale"]);
+        assert_eq!(r.args, ["in.html", "out.pdf"]);
+        assert_eq!(r.ignored, ["--cookie", "--outline"]);
+        assert_eq!(r.lossy, ["--margin-top", "-L", "--footer-right"]);
     }
 
     #[test]
     fn passes_supported_options_and_their_values() {
         // `toc` here is a title, not the TOC object keyword.
-        let (args, ignored) = run(&["--title", "toc", "-s", "A4", "-q", "-", "-"]);
-        assert_eq!(args, ["--title", "toc", "-s", "A4", "-q", "-", "-"]);
-        assert!(ignored.is_empty());
+        let r = run(&["--title", "toc", "-s", "A4", "-q", "-", "-"]);
+        assert_eq!(r.args, ["--title", "toc", "-s", "A4", "-q", "-", "-"]);
+        assert!(r.ignored.is_empty() && r.lossy.is_empty());
     }
 
     #[test]
     fn accepts_options_that_match_default_behavior_silently() {
-        let (args, ignored) = run(&["-n", "--disable-local-file-access", "a", "b"]);
-        assert_eq!(args, ["a", "b"]);
-        assert!(ignored.is_empty());
+        let r = run(&[
+            "-n",
+            "--disable-local-file-access",
+            "--disable-smart-shrinking",
+            "a",
+            "b",
+        ]);
+        assert_eq!(r.args, ["a", "b"]);
+        assert!(r.ignored.is_empty() && r.lossy.is_empty());
     }
 
     #[test]
     fn handles_inline_values() {
-        let (args, ignored) = run(&["--margin-top=1in", "--page-size=A5", "a", "b"]);
-        assert_eq!(args, ["--page-size=A5", "a", "b"]);
-        assert_eq!(ignored, ["--margin-top"]);
+        let r = run(&["--margin-top=1in", "--page-size=A5", "a", "b"]);
+        assert_eq!(r.args, ["--page-size=A5", "a", "b"]);
+        assert_eq!(r.lossy, ["--margin-top"]);
     }
 
     #[test]
     fn log_level_none_means_quiet() {
         assert_eq!(
-            run(&["--log-level", "none", "a", "b"]).0,
+            run(&["--log-level", "none", "a", "b"]).args,
             ["--quiet", "a", "b"]
         );
-        assert_eq!(run(&["--log-level", "warn", "a", "b"]).0, ["a", "b"]);
+        assert_eq!(run(&["--log-level", "warn", "a", "b"]).args, ["a", "b"]);
     }
 
     #[test]
     fn handles_object_keywords() {
-        let (args, ignored) = run(&["cover", "c.html", "toc", "page", "in.html", "out.pdf"]);
-        assert_eq!(args, ["in.html", "out.pdf"]);
-        assert_eq!(ignored, ["cover", "toc"]);
+        let r = run(&["cover", "c.html", "toc", "page", "in.html", "out.pdf"]);
+        assert_eq!(r.args, ["in.html", "out.pdf"]);
+        assert_eq!(r.lossy, ["cover", "toc"]);
+    }
+
+    /// wicked_pdf falls back to the 0.9 spelling when it misdetects the
+    /// binary's version.
+    #[test]
+    fn handles_old_style_object_options() {
+        let r = run(&["-q", "--cover", "c.html", "--toc", "in.html", "out.pdf"]);
+        assert_eq!(r.args, ["-q", "in.html", "out.pdf"]);
+        assert_eq!(r.lossy, ["--cover", "--toc"]);
+    }
+
+    #[test]
+    fn detects_version_flag() {
+        assert!(run(&["-V"]).version);
+        assert!(run(&["--version"]).version);
+        assert!(!run(&["a", "b"]).version);
     }
 
     #[test]
     fn leaves_unknown_options_for_clap() {
-        assert_eq!(run(&["--bogus", "a", "b"]).0, ["--bogus", "a", "b"]);
+        assert_eq!(run(&["--bogus", "a", "b"]).args, ["--bogus", "a", "b"]);
     }
 
     #[test]
     fn stops_at_double_dash() {
-        let (args, ignored) = run(&["--", "--grayscale", "toc"]);
-        assert_eq!(args, ["--", "--grayscale", "toc"]);
-        assert!(ignored.is_empty());
+        let r = run(&["--", "--grayscale", "toc"]);
+        assert_eq!(r.args, ["--", "--grayscale", "toc"]);
+        assert!(r.ignored.is_empty() && r.lossy.is_empty());
     }
 }

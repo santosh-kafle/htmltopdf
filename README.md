@@ -14,10 +14,18 @@ maintained, and accepts the same command line.
   is recognised, so invocations from wrapper libraries such as `pdfkit`,
   `wicked_pdf` and `snappy` parse:
   - `-` reads HTML from standard input or writes the PDF to standard output.
-  - `-q` / `--quiet` and `--log-level none` silence warnings.
   - `file://` input URLs are accepted.
+  - `-V` reports `wkhtmltopdf 0.12.6 (presswork <version>)`, so wrappers that
+    check the version (such as `wicked_pdf`) use the current argument style.
   - Options that are not implemented yet are ignored with a warning.
     Options unknown to wkhtmltopdf are rejected, as wkhtmltopdf does.
+  - `-q` / `--quiet` and `--log-level none` silence warnings, except for
+    ignored options that change the output, such as margins, headers and
+    footers. Those are always reported, because `pdfkit` passes `--quiet` by
+    default.
+  - `--strict`, or `PRESSWORK_STRICT=1` in the environment, makes those
+    options an error instead of a warning. Use the environment variable when
+    a wrapper library builds the command line for you.
 - **Page options.** `-s` / `--page-size` accepts every size wkhtmltopdf does
   (A0–A9, B0–B10, C5E, Comm10E, DLE, Executive, Folio, Ledger, Legal, Letter,
   Tabloid). `-O` / `--orientation` and `--title` are also supported.
