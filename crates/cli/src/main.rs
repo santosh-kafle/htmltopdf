@@ -1,4 +1,5 @@
 mod compat;
+mod page;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -7,9 +8,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
-use presswork_layout::{Engine, LayoutOptions};
-use presswork_layout::{Orientation, PageSize};
+use presswork_layout::Engine;
 use presswork_paint::PdfOptions;
+use presswork_style::Stylist;
+
+use page::PageArgs;
 
 /// Convert HTML documents to PDF.
 ///
@@ -23,14 +26,8 @@ struct Cli {
     #[arg(value_name = "INPUT OUTPUT", num_args = 2.., required = true)]
     paths: Vec<OsString>,
 
-    /// Page size: A0-A9, B0-B10, C5E, Comm10E, DLE, Executive, Folio,
-    /// Ledger, Legal, Letter or Tabloid.
-    #[arg(short = 's', long, default_value_t = PageSize::A4)]
-    page_size: PageSize,
-
-    /// Page orientation: Portrait or Landscape.
-    #[arg(short = 'O', long, default_value = "Portrait")]
-    orientation: Orientation,
+    #[command(flatten)]
+    page: PageArgs,
 
     /// Document title written to the PDF metadata.
     #[arg(long)]
@@ -42,7 +39,7 @@ struct Cli {
     quiet: bool,
 
     /// Fail instead of warning when an unsupported option would change the
-    /// output (margins, headers, footers, ...).
+    /// output (headers, footers, zoom, ...).
     #[arg(
         long,
         env = "PRESSWORK_STRICT",
@@ -172,14 +169,12 @@ impl Cli {
     }
 }
 
-/// Runs the whole pipeline: parse, lay out, write the PDF.
+/// Runs the whole pipeline: parse, style, lay out, write the PDF.
 fn render(html: &[u8], cli: &Cli) -> Result<Vec<u8>> {
     let doc = presswork_dom::parse_html(html);
-    let layout = LayoutOptions {
-        page_size: cli.page_size.size(cli.orientation),
-        ..LayoutOptions::default()
-    };
-    let pages = Engine::new().layout(&doc, &layout);
+    let styles = Stylist::for_document(&doc);
+    let layout = cli.page.layout_options(styles.page());
+    let pages = Engine::new().layout(&doc, &styles, &layout);
     let pdf = PdfOptions {
         // wkhtmltopdf uses the document's <title> unless --title is given.
         title: cli.title.clone().or_else(|| doc.title()),
@@ -209,6 +204,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use presswork_layout::{Orientation, PageSize};
 
     fn parse(args: &[&str]) -> Result<(Cli, compat::Normalized), clap::Error> {
         let n = compat::normalize(std::iter::once("presswork").chain(args.iter().copied()));
@@ -234,8 +230,8 @@ mod tests {
         ])
         .expect("wkhtmltopdf-style arguments should parse");
 
-        assert_eq!(cli.page_size, PageSize::Letter);
-        assert_eq!(cli.orientation, Orientation::Landscape);
+        assert_eq!(cli.page.page_size, Some(PageSize::Letter));
+        assert_eq!(cli.page.orientation, Some(Orientation::Landscape));
         assert_eq!(cli.title.as_deref(), Some("Invoice"));
         assert_eq!(
             cli.io().unwrap(),
@@ -268,14 +264,16 @@ mod tests {
         .expect("pdfkit arguments should parse");
 
         assert!(cli.quiet);
-        assert_eq!(cli.page_size, PageSize::Letter);
+        assert_eq!(cli.page.page_size, Some(PageSize::Letter));
+        assert_eq!(cli.page.margin_top, Some(54.0));
         assert_eq!(cli.io().unwrap(), (Source::Stdin, Sink::Stdout));
-        assert_eq!(ignored.lossy.len(), 5);
+        assert_eq!(ignored.lossy, ["--encoding"]);
 
-        // pdfkit always passes --quiet, but dropped margins still warn.
+        // pdfkit always passes --quiet, but options that change the output
+        // still warn.
         let warnings = cli.check_ignored(&ignored).unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("--margin-top"), "{warnings:?}");
+        assert!(warnings[0].contains("--encoding"), "{warnings:?}");
     }
 
     /// The shape of a wicked_pdf invocation: options, then its temporary
@@ -295,7 +293,7 @@ mod tests {
         ])
         .expect("wicked_pdf arguments should parse");
 
-        assert_eq!(cli.orientation, Orientation::Portrait);
+        assert_eq!(cli.page.orientation, Some(Orientation::Portrait));
         assert_eq!(
             cli.io().unwrap().0,
             Source::File("/tmp/wicked_pdf.html".into())
@@ -328,12 +326,12 @@ mod tests {
 
     #[test]
     fn quiet_silences_only_harmless_warnings() {
-        let (cli, n) = parse(&["-q", "--outline", "--margin-top", "1in", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["-q", "--outline", "--zoom", "2", "a", "b"]).unwrap();
         let warnings = cli.check_ignored(&n).unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("--margin-top") && !warnings[0].contains("--outline"));
+        assert!(warnings[0].contains("--zoom") && !warnings[0].contains("--outline"));
 
-        let (cli, n) = parse(&["--outline", "--margin-top", "1in", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["--outline", "--zoom", "2", "a", "b"]).unwrap();
         assert_eq!(cli.check_ignored(&n).unwrap().len(), 2);
     }
 
@@ -374,7 +372,7 @@ mod tests {
     fn accepts_every_wkhtmltopdf_page_size() {
         for size in PageSize::ALL {
             let (cli, _) = parse(&["-s", size.name(), "a", "b"]).unwrap();
-            assert_eq!(cli.page_size, *size);
+            assert_eq!(cli.page.page_size, Some(*size));
         }
     }
 }

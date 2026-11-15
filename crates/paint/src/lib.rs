@@ -9,11 +9,15 @@ use std::fmt;
 use std::sync::Arc;
 
 use krilla::Document;
+use krilla::color::rgb;
 use krilla::geom::{PathBuilder, Point, Rect};
 use krilla::metadata::Metadata;
+use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
+use krilla::paint::Fill;
+use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
-use presswork_layout::{FontData, Item, Page, TextRun};
+use presswork_layout::{Color, FontData, Item, Page, TextRun};
 
 /// Document-level options for the generated PDF.
 #[derive(Debug, Clone, Default)]
@@ -53,17 +57,20 @@ pub fn render_pdf(pages: &[Page], options: &PdfOptions) -> Result<Vec<u8>, Error
                         draw_text(&mut surface, run, font);
                     }
                 }
-                Item::Rule(rect) => {
-                    let mut path = PathBuilder::new();
-                    if let Some(rect) = Rect::from_xywh(
+                Item::Fill(fill) => {
+                    let rect = fill.rect;
+                    let Some(rect) = Rect::from_xywh(
                         rect.origin.x,
                         rect.origin.y,
                         rect.size.width,
                         rect.size.height,
-                    ) {
-                        path.push_rect(rect);
-                    }
+                    ) else {
+                        continue;
+                    };
+                    let mut path = PathBuilder::new();
+                    path.push_rect(rect);
                     if let Some(path) = path.finish() {
+                        set_color(&mut surface, fill.color);
                         surface.draw_path(&path);
                     }
                 }
@@ -84,11 +91,22 @@ pub fn render_pdf(pages: &[Page], options: &PdfOptions) -> Result<Vec<u8>, Error
     document.finish().map_err(|e| Error(e.to_string()))
 }
 
-fn draw_text(surface: &mut krilla::surface::Surface<'_>, run: &TextRun, font: Font) {
+/// Sets the fill color for the drawing operations that follow.
+fn set_color(surface: &mut Surface<'_>, color: Color) {
+    let opacity = NormalizedF32::new(f32::from(color.a) / 255.0).unwrap_or(NormalizedF32::ONE);
+    surface.set_fill(Some(Fill {
+        paint: rgb::Color::new(color.r, color.g, color.b).into(),
+        opacity,
+        rule: Default::default(),
+    }));
+}
+
+fn draw_text(surface: &mut Surface<'_>, run: &TextRun, font: Font) {
     let size = run.font_size;
-    if size <= 0.0 {
+    if size <= 0.0 || run.color.is_transparent() {
         return;
     }
+    set_color(surface, run.color);
     // krilla wants advances and offsets as fractions of the font size, with
     // y pointing up.
     let glyphs: Vec<KrillaGlyph> = run
@@ -138,11 +156,15 @@ impl FontCache {
 mod tests {
     use super::*;
     use presswork_layout::{Engine, LayoutOptions};
+    use presswork_style::Stylist;
 
     #[test]
     fn writes_a_pdf_with_text() {
-        let doc = presswork_dom::parse_html(b"<p>Hello</p>");
-        let pages = Engine::new().layout(&doc, &LayoutOptions::default());
+        let doc = presswork_dom::parse_html(
+            b"<p style='color: #c00; background: #eee; border: 1px solid'>Hello</p>",
+        );
+        let styles = Stylist::for_document(&doc);
+        let pages = Engine::new().layout(&doc, &styles, &LayoutOptions::default());
         let pdf = render_pdf(
             &pages,
             &PdfOptions {

@@ -25,6 +25,8 @@ fn renders_stdin_to_stdout_like_pdfkit() {
             "Letter",
             "--margin-top",
             "0.75in",
+            "--footer-right",
+            "[page]",
             "-",
             "-",
         ],
@@ -33,8 +35,10 @@ fn renders_stdin_to_stdout_like_pdfkit() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(out.stdout.starts_with(b"%PDF-"));
-    // Dropped margins are reported even under --quiet.
-    assert!(stderr.contains("--margin-top"), "{stderr}");
+    // Options that change the output are reported even under --quiet;
+    // supported ones are not.
+    assert!(stderr.contains("--footer-right"), "{stderr}");
+    assert!(!stderr.contains("--margin-top"), "{stderr}");
 }
 
 #[test]

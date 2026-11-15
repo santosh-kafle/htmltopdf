@@ -1,0 +1,959 @@
+//! CSS properties: identifiers, specified values and declaration parsing.
+//!
+//! # Adding a property
+//!
+//! 1. Add a variant to [`LonghandId`] and say whether it is inherited in
+//!    [`LonghandId::is_inherited`].
+//! 2. Add a variant carrying its specified value to [`PropertyDeclaration`]
+//!    and map it in [`PropertyDeclaration::id`].
+//! 3. Map its CSS name in [`longhands_of`] and parse its value in
+//!    [`parse_longhand`].
+//! 4. Add a field to `ComputedStyle`, then handle the property in
+//!    `ComputedStyle::apply` and `ComputedStyle::copy_longhand`.
+//!
+//! The compiler's exhaustiveness checks point at every place that needs a
+//! new arm. Shorthands only expand to longhands, in [`parse_declaration`].
+
+use std::sync::Arc;
+
+use cssparser::{Parser, Token};
+
+use crate::values::{ColorValue, Dim, Invalid, Length, Parsed, Side};
+
+/// Defines an enum of CSS keywords with a `from_keyword` parser. A variant
+/// may list several keywords that map to it.
+macro_rules! keyword_enum {
+    (
+        $(#[$meta:meta])*
+        $name:ident { $($(#[$vmeta:meta])* $variant:ident = $($css:literal)|+),* $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($(#[$vmeta])* $variant,)*
+        }
+
+        impl $name {
+            /// Parses a keyword, case-insensitively.
+            pub fn from_keyword(keyword: &str) -> Option<Self> {
+                match keyword.to_ascii_lowercase().as_str() {
+                    $($($css)|+ => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+
+            #[allow(dead_code, reason = "not every keyword enum is a whole property value")]
+            fn parse(input: &mut Parser<'_>) -> Parsed<Self> {
+                let ident = input.expect_ident().map_err(Invalid::from)?;
+                Self::from_keyword(ident).ok_or(Invalid)
+            }
+        }
+    };
+}
+
+keyword_enum! {
+    /// The `display` value, limited to what layout supports. Unsupported
+    /// layout modes fall back to the closest supported one.
+    Display {
+        None = "none" | "table-column" | "table-column-group",
+        Block = "block" | "flow-root" | "flex" | "grid",
+        Inline = "inline" | "inline-block" | "inline-flex" | "inline-grid",
+        ListItem = "list-item",
+        Table = "table" | "inline-table",
+        TableRowGroup = "table-row-group",
+        TableHeaderGroup = "table-header-group",
+        TableFooterGroup = "table-footer-group",
+        TableRow = "table-row",
+        TableCell = "table-cell",
+        TableCaption = "table-caption",
+    }
+}
+
+impl Display {
+    /// Whether the box takes part in block layout (as opposed to inline).
+    pub fn is_block_level(self) -> bool {
+        !matches!(self, Display::Inline | Display::None)
+    }
+}
+
+keyword_enum! {
+    /// Horizontal alignment of inline content.
+    TextAlign {
+        Left = "left" | "start" | "-webkit-left" | "-moz-left",
+        Right = "right" | "end" | "-webkit-right" | "-moz-right",
+        Center = "center" | "-webkit-center" | "-moz-center",
+        Justify = "justify",
+    }
+}
+
+keyword_enum! {
+    WhiteSpace {
+        Normal = "normal",
+        Nowrap = "nowrap",
+        Pre = "pre",
+        PreWrap = "pre-wrap" | "break-spaces",
+        PreLine = "pre-line",
+    }
+}
+
+impl WhiteSpace {
+    /// Whether runs of spaces collapse to one.
+    pub fn collapses_spaces(self) -> bool {
+        matches!(
+            self,
+            WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine
+        )
+    }
+
+    /// Whether line breaks in the source are kept.
+    pub fn preserves_newlines(self) -> bool {
+        matches!(
+            self,
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        )
+    }
+
+    /// Whether lines may wrap.
+    pub fn wraps(self) -> bool {
+        !matches!(self, WhiteSpace::Nowrap | WhiteSpace::Pre)
+    }
+}
+
+keyword_enum! {
+    BorderStyle {
+        None = "none",
+        Hidden = "hidden",
+        Solid = "solid",
+        Dashed = "dashed",
+        Dotted = "dotted",
+        Double = "double",
+        Groove = "groove",
+        Ridge = "ridge",
+        Inset = "inset",
+        Outset = "outset",
+    }
+}
+
+impl BorderStyle {
+    /// Whether a border with this style is drawn at all.
+    pub fn is_visible(self) -> bool {
+        !matches!(self, BorderStyle::None | BorderStyle::Hidden)
+    }
+}
+
+keyword_enum! {
+    BoxSizing {
+        ContentBox = "content-box",
+        BorderBox = "border-box",
+    }
+}
+
+keyword_enum! {
+    /// `vertical-align`, as it applies to table cells.
+    VerticalAlign {
+        Baseline = "baseline" | "sub" | "super" | "text-top" | "text-bottom",
+        Top = "top",
+        Middle = "middle",
+        Bottom = "bottom",
+    }
+}
+
+keyword_enum! {
+    ListStyleType {
+        None = "none",
+        Disc = "disc",
+        Circle = "circle",
+        Square = "square",
+        Decimal = "decimal" | "decimal-leading-zero",
+        LowerAlpha = "lower-alpha" | "lower-latin",
+        UpperAlpha = "upper-alpha" | "upper-latin",
+        LowerRoman = "lower-roman",
+        UpperRoman = "upper-roman",
+    }
+}
+
+keyword_enum! {
+    /// `break-before` / `break-after` (and the legacy `page-break-*`).
+    Break {
+        Auto = "auto",
+        Avoid = "avoid" | "avoid-page" | "avoid-column",
+        Page = "page" | "always" | "left" | "right" | "recto" | "verso",
+    }
+}
+
+keyword_enum! {
+    BorderCollapse {
+        Separate = "separate",
+        Collapse = "collapse",
+    }
+}
+
+keyword_enum! {
+    /// The CSS-wide keywords every property accepts.
+    CssWide {
+        Inherit = "inherit",
+        Initial = "initial",
+        Unset = "unset" | "revert" | "revert-layer",
+    }
+}
+
+keyword_enum! {
+    GenericFamily {
+        Serif = "serif" | "ui-serif",
+        SansSerif = "sans-serif" | "system-ui" | "ui-sans-serif" | "cursive" | "fantasy",
+        Monospace = "monospace" | "ui-monospace",
+    }
+}
+
+/// One entry of a `font-family` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontFamilyName {
+    Named(String),
+    Generic(GenericFamily),
+}
+
+/// A specified `font-size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FontSize {
+    Length(Length),
+    /// A fraction of the parent's font size.
+    Percent(f32),
+    Smaller,
+    Larger,
+}
+
+/// A specified `font-weight`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FontWeight {
+    Weight(f32),
+    Bolder,
+    Lighter,
+}
+
+/// A `line-height`. Used for both specified and computed values; a computed
+/// `Length` is always in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    Normal,
+    /// A multiple of the element's own font size, inherited as a factor.
+    Number(f32),
+    Length(Length),
+    /// A fraction of the element's font size, inherited as a length.
+    Percent(f32),
+}
+
+/// A longhand property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LonghandId {
+    Display,
+    Color,
+    BackgroundColor,
+    FontFamily,
+    FontSize,
+    FontWeight,
+    FontStyle,
+    LineHeight,
+    TextAlign,
+    WhiteSpace,
+    Margin(Side),
+    Padding(Side),
+    BorderWidth(Side),
+    BorderStyle(Side),
+    BorderColor(Side),
+    Width,
+    BoxSizing,
+    VerticalAlign,
+    BorderCollapse,
+    BorderSpacing,
+    ListStyleType,
+    BreakBefore,
+    BreakAfter,
+}
+
+impl LonghandId {
+    /// Whether the property inherits from the parent by default.
+    pub fn is_inherited(self) -> bool {
+        use LonghandId::*;
+        match self {
+            Color | FontFamily | FontSize | FontWeight | FontStyle | LineHeight | TextAlign
+            | WhiteSpace | BorderCollapse | BorderSpacing | ListStyleType => true,
+            Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
+            | BorderStyle(_) | BorderColor(_) | Width | BoxSizing | VerticalAlign | BreakBefore
+            | BreakAfter => false,
+        }
+    }
+
+    /// Every longhand, for code that must visit them all.
+    pub fn all() -> impl Iterator<Item = LonghandId> {
+        use LonghandId::*;
+        let simple = [
+            Display,
+            Color,
+            BackgroundColor,
+            FontFamily,
+            FontSize,
+            FontWeight,
+            FontStyle,
+            LineHeight,
+            TextAlign,
+            WhiteSpace,
+            Width,
+            BoxSizing,
+            VerticalAlign,
+            BorderCollapse,
+            BorderSpacing,
+            ListStyleType,
+            BreakBefore,
+            BreakAfter,
+        ];
+        let sided = Side::ALL.into_iter().flat_map(|side| {
+            [
+                Margin(side),
+                Padding(side),
+                BorderWidth(side),
+                BorderStyle(side),
+                BorderColor(side),
+            ]
+        });
+        simple.into_iter().chain(sided)
+    }
+}
+
+/// A parsed declaration of one longhand: the property and its specified
+/// value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyDeclaration {
+    Display(Display),
+    Color(ColorValue),
+    BackgroundColor(ColorValue),
+    FontFamily(Arc<[FontFamilyName]>),
+    FontSize(FontSize),
+    FontWeight(FontWeight),
+    /// `true` for `italic` and `oblique`.
+    FontStyle(bool),
+    LineHeight(LineHeight),
+    TextAlign(TextAlign),
+    WhiteSpace(WhiteSpace),
+    Margin(Side, Dim),
+    Padding(Side, Dim),
+    BorderWidth(Side, Length),
+    BorderStyle(Side, BorderStyle),
+    BorderColor(Side, ColorValue),
+    Width(Dim),
+    BoxSizing(BoxSizing),
+    VerticalAlign(VerticalAlign),
+    BorderCollapse(BorderCollapse),
+    BorderSpacing(Length),
+    ListStyleType(ListStyleType),
+    BreakBefore(Break),
+    BreakAfter(Break),
+    /// `inherit`, `initial` or `unset` for the given property.
+    CssWide(LonghandId, CssWide),
+}
+
+impl PropertyDeclaration {
+    /// The property this declaration sets.
+    pub fn id(&self) -> LonghandId {
+        use PropertyDeclaration as D;
+        match self {
+            D::Display(_) => LonghandId::Display,
+            D::Color(_) => LonghandId::Color,
+            D::BackgroundColor(_) => LonghandId::BackgroundColor,
+            D::FontFamily(_) => LonghandId::FontFamily,
+            D::FontSize(_) => LonghandId::FontSize,
+            D::FontWeight(_) => LonghandId::FontWeight,
+            D::FontStyle(_) => LonghandId::FontStyle,
+            D::LineHeight(_) => LonghandId::LineHeight,
+            D::TextAlign(_) => LonghandId::TextAlign,
+            D::WhiteSpace(_) => LonghandId::WhiteSpace,
+            D::Margin(side, _) => LonghandId::Margin(*side),
+            D::Padding(side, _) => LonghandId::Padding(*side),
+            D::BorderWidth(side, _) => LonghandId::BorderWidth(*side),
+            D::BorderStyle(side, _) => LonghandId::BorderStyle(*side),
+            D::BorderColor(side, _) => LonghandId::BorderColor(*side),
+            D::Width(_) => LonghandId::Width,
+            D::BoxSizing(_) => LonghandId::BoxSizing,
+            D::VerticalAlign(_) => LonghandId::VerticalAlign,
+            D::BorderCollapse(_) => LonghandId::BorderCollapse,
+            D::BorderSpacing(_) => LonghandId::BorderSpacing,
+            D::ListStyleType(_) => LonghandId::ListStyleType,
+            D::BreakBefore(_) => LonghandId::BreakBefore,
+            D::BreakAfter(_) => LonghandId::BreakAfter,
+            D::CssWide(id, _) => *id,
+        }
+    }
+}
+
+/// `medium`, the initial `border-width`.
+pub const BORDER_WIDTH_MEDIUM: Length = Length::Pt(2.25);
+
+fn sided(f: fn(Side) -> LonghandId) -> Vec<LonghandId> {
+    Side::ALL.into_iter().map(f).collect()
+}
+
+fn side_of(name: &str) -> Option<Side> {
+    match name {
+        "top" => Some(Side::Top),
+        "right" => Some(Side::Right),
+        "bottom" => Some(Side::Bottom),
+        "left" => Some(Side::Left),
+        _ => None,
+    }
+}
+
+fn border_side_longhands(side: Side) -> Vec<LonghandId> {
+    vec![
+        LonghandId::BorderWidth(side),
+        LonghandId::BorderStyle(side),
+        LonghandId::BorderColor(side),
+    ]
+}
+
+/// The longhands a property name (longhand or shorthand, lowercase) sets,
+/// or `None` if the property is not supported.
+pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
+    use LonghandId as L;
+    let one = |id| Some(vec![id]);
+    match name {
+        "display" => one(L::Display),
+        "color" => one(L::Color),
+        "background-color" | "background" => one(L::BackgroundColor),
+        "font-family" => one(L::FontFamily),
+        "font-size" => one(L::FontSize),
+        "font-weight" => one(L::FontWeight),
+        "font-style" => one(L::FontStyle),
+        "line-height" => one(L::LineHeight),
+        "text-align" => one(L::TextAlign),
+        "white-space" => one(L::WhiteSpace),
+        "width" => one(L::Width),
+        "box-sizing" => one(L::BoxSizing),
+        "vertical-align" => one(L::VerticalAlign),
+        "border-collapse" => one(L::BorderCollapse),
+        "border-spacing" => one(L::BorderSpacing),
+        "list-style-type" | "list-style" => one(L::ListStyleType),
+        "break-before" | "page-break-before" => one(L::BreakBefore),
+        "break-after" | "page-break-after" => one(L::BreakAfter),
+        "font" => Some(vec![
+            L::FontStyle,
+            L::FontWeight,
+            L::FontSize,
+            L::LineHeight,
+            L::FontFamily,
+        ]),
+        "margin" => Some(sided(L::Margin)),
+        "padding" => Some(sided(L::Padding)),
+        "border-width" => Some(sided(L::BorderWidth)),
+        "border-style" => Some(sided(L::BorderStyle)),
+        "border-color" => Some(sided(L::BorderColor)),
+        "border" => Some(
+            Side::ALL
+                .into_iter()
+                .flat_map(border_side_longhands)
+                .collect(),
+        ),
+        _ => {
+            if let Some(side) = name.strip_prefix("margin-").and_then(side_of) {
+                return one(L::Margin(side));
+            }
+            if let Some(side) = name.strip_prefix("padding-").and_then(side_of) {
+                return one(L::Padding(side));
+            }
+            let rest = name.strip_prefix("border-")?;
+            if let Some(side) = side_of(rest) {
+                return Some(border_side_longhands(side));
+            }
+            let (side, part) = rest.split_once('-')?;
+            let side = side_of(side)?;
+            match part {
+                "width" => one(L::BorderWidth(side)),
+                "style" => one(L::BorderStyle(side)),
+                "color" => one(L::BorderColor(side)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Parses the value of the property `name` and appends the resulting
+/// longhand declarations to `out`. The whole input must be consumed.
+///
+/// Returns `Err` for unknown properties and invalid values; `out` may then
+/// hold partial results and should be discarded by the caller.
+pub fn parse_declaration(
+    name: &str,
+    input: &mut Parser<'_>,
+    out: &mut Vec<PropertyDeclaration>,
+) -> Parsed<()> {
+    use PropertyDeclaration as D;
+    let name = name.to_ascii_lowercase();
+    let longhands = longhands_of(&name).ok_or(Invalid)?;
+
+    let css_wide = input.try_parse(|i| {
+        let keyword = CssWide::parse(i)?;
+        i.expect_exhausted().map_err(Invalid::from)?;
+        Ok::<_, Invalid>(keyword)
+    });
+    if let Ok(keyword) = css_wide {
+        out.extend(longhands.into_iter().map(|id| D::CssWide(id, keyword)));
+        return Ok(());
+    }
+
+    match name.as_str() {
+        "margin" => four_sides(input, |i| Dim::parse(i, true, true), D::Margin, out)?,
+        "padding" => four_sides(input, |i| Dim::parse(i, false, false), D::Padding, out)?,
+        "border-width" => four_sides(input, parse_border_width, D::BorderWidth, out)?,
+        "border-style" => four_sides(input, BorderStyle::parse, D::BorderStyle, out)?,
+        "border-color" => four_sides(input, ColorValue::parse, D::BorderColor, out)?,
+        "border" => parse_border(input, &Side::ALL, out)?,
+        "border-top" => parse_border(input, &[Side::Top], out)?,
+        "border-right" => parse_border(input, &[Side::Right], out)?,
+        "border-bottom" => parse_border(input, &[Side::Bottom], out)?,
+        "border-left" => parse_border(input, &[Side::Left], out)?,
+        "font" => parse_font(input, out)?,
+        "background" => out.push(D::BackgroundColor(parse_background(input))),
+        "list-style" => out.push(D::ListStyleType(parse_list_style(input))),
+        _ => out.push(parse_longhand(longhands[0], input)?),
+    }
+    input.expect_exhausted().map_err(Invalid::from)
+}
+
+/// Parses the value of a single longhand.
+fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDeclaration> {
+    use LonghandId as L;
+    use PropertyDeclaration as D;
+    Ok(match id {
+        L::Display => D::Display(Display::parse(input)?),
+        L::Color => D::Color(ColorValue::parse(input)?),
+        L::BackgroundColor => D::BackgroundColor(ColorValue::parse(input)?),
+        L::FontFamily => D::FontFamily(parse_font_family(input)?),
+        L::FontSize => D::FontSize(parse_font_size(input)?),
+        L::FontWeight => D::FontWeight(parse_font_weight(input)?),
+        L::FontStyle => D::FontStyle(parse_font_style(input)?),
+        L::LineHeight => D::LineHeight(parse_line_height(input)?),
+        L::TextAlign => D::TextAlign(TextAlign::parse(input)?),
+        L::WhiteSpace => D::WhiteSpace(WhiteSpace::parse(input)?),
+        L::Margin(side) => D::Margin(side, Dim::parse(input, true, true)?),
+        L::Padding(side) => D::Padding(side, Dim::parse(input, false, false)?),
+        L::BorderWidth(side) => D::BorderWidth(side, parse_border_width(input)?),
+        L::BorderStyle(side) => D::BorderStyle(side, BorderStyle::parse(input)?),
+        L::BorderColor(side) => D::BorderColor(side, ColorValue::parse(input)?),
+        L::Width => D::Width(Dim::parse(input, true, false)?),
+        L::BoxSizing => D::BoxSizing(BoxSizing::parse(input)?),
+        L::VerticalAlign => D::VerticalAlign(VerticalAlign::parse(input)?),
+        L::BorderCollapse => D::BorderCollapse(BorderCollapse::parse(input)?),
+        L::BorderSpacing => {
+            let horizontal = Length::parse_non_negative(input)?;
+            // The optional second value is the vertical spacing; one value
+            // is used for both directions.
+            let _ = input.try_parse(Length::parse_non_negative);
+            D::BorderSpacing(horizontal)
+        }
+        L::ListStyleType => D::ListStyleType(ListStyleType::parse(input)?),
+        L::BreakBefore => D::BreakBefore(Break::parse(input)?),
+        L::BreakAfter => D::BreakAfter(Break::parse(input)?),
+    })
+}
+
+/// Parses one to four values and assigns them to sides the way `margin`
+/// does: all; vertical, horizontal; top, horizontal, bottom; or each side.
+fn four_sides<T: Copy>(
+    input: &mut Parser<'_>,
+    mut parse: impl FnMut(&mut Parser<'_>) -> Parsed<T>,
+    declare: fn(Side, T) -> PropertyDeclaration,
+    out: &mut Vec<PropertyDeclaration>,
+) -> Parsed<()> {
+    let mut values = vec![parse(input)?];
+    while values.len() < 4 {
+        match input.try_parse(&mut parse) {
+            Ok(value) => values.push(value),
+            Err(Invalid) => break,
+        }
+    }
+    let (top, right, bottom, left) = match values[..] {
+        [a] => (a, a, a, a),
+        [a, b] => (a, b, a, b),
+        [a, b, c] => (a, b, c, b),
+        [a, b, c, d] => (a, b, c, d),
+        _ => unreachable!("one to four values"),
+    };
+    out.extend([
+        declare(Side::Top, top),
+        declare(Side::Right, right),
+        declare(Side::Bottom, bottom),
+        declare(Side::Left, left),
+    ]);
+    Ok(())
+}
+
+fn parse_border_width(input: &mut Parser<'_>) -> Parsed<Length> {
+    if let Ok(length) = input.try_parse(Length::parse_non_negative) {
+        return Ok(length);
+    }
+    let ident = input.expect_ident().map_err(Invalid::from)?;
+    match ident.to_ascii_lowercase().as_str() {
+        "thin" => Ok(Length::px(1.0)),
+        "medium" => Ok(BORDER_WIDTH_MEDIUM),
+        "thick" => Ok(Length::px(5.0)),
+        _ => Err(Invalid),
+    }
+}
+
+/// `border` and `border-<side>`: width, style and color in any order.
+/// Omitted parts reset to their initial values.
+fn parse_border(
+    input: &mut Parser<'_>,
+    sides: &[Side],
+    out: &mut Vec<PropertyDeclaration>,
+) -> Parsed<()> {
+    let (mut width, mut style, mut color) = (None, None, None);
+    let mut any = false;
+    loop {
+        if width.is_none()
+            && let Ok(v) = input.try_parse(parse_border_width)
+        {
+            width = Some(v);
+        } else if style.is_none()
+            && let Ok(v) = input.try_parse(BorderStyle::parse)
+        {
+            style = Some(v);
+        } else if color.is_none()
+            && let Ok(v) = input.try_parse(ColorValue::parse)
+        {
+            color = Some(v);
+        } else {
+            break;
+        }
+        any = true;
+    }
+    if !any {
+        return Err(Invalid);
+    }
+    for &side in sides {
+        out.extend([
+            PropertyDeclaration::BorderWidth(side, width.unwrap_or(BORDER_WIDTH_MEDIUM)),
+            PropertyDeclaration::BorderStyle(side, style.unwrap_or(BorderStyle::None)),
+            PropertyDeclaration::BorderColor(side, color.unwrap_or(ColorValue::CurrentColor)),
+        ]);
+    }
+    Ok(())
+}
+
+fn parse_font_family(input: &mut Parser<'_>) -> Parsed<Arc<[FontFamilyName]>> {
+    let families = input
+        .parse_comma_separated(|i| {
+            if let Ok(name) = i.try_parse(|i| i.expect_string_cloned()) {
+                return Ok(FontFamilyName::Named(name.to_string()));
+            }
+            // An unquoted name is one or more identifiers.
+            let mut name = i.expect_ident()?.to_string();
+            let mut words = 1;
+            while let Ok(word) = i.try_parse(|i| i.expect_ident_cloned()) {
+                name.push(' ');
+                name.push_str(&word);
+                words += 1;
+            }
+            let generic = (words == 1)
+                .then(|| GenericFamily::from_keyword(&name))
+                .flatten();
+            Ok::<_, cssparser::ParseError<Invalid>>(match generic {
+                Some(generic) => FontFamilyName::Generic(generic),
+                None => FontFamilyName::Named(name),
+            })
+        })
+        .map_err(Invalid::from)?;
+    Ok(families.into())
+}
+
+fn parse_font_size(input: &mut Parser<'_>) -> Parsed<FontSize> {
+    if let Ok(fraction) = input.try_parse(|i| i.expect_percentage()) {
+        return if fraction < 0.0 {
+            Err(Invalid)
+        } else {
+            Ok(FontSize::Percent(fraction))
+        };
+    }
+    if let Ok(length) = input.try_parse(Length::parse_non_negative) {
+        return Ok(FontSize::Length(length));
+    }
+    let ident = input.expect_ident().map_err(Invalid::from)?;
+    let px = |v: f32| Ok(FontSize::Length(Length::px(v)));
+    match ident.to_ascii_lowercase().as_str() {
+        "xx-small" => px(9.0),
+        "x-small" => px(10.0),
+        "small" => px(13.0),
+        "medium" => px(16.0),
+        "large" => px(18.0),
+        "x-large" => px(24.0),
+        "xx-large" => px(32.0),
+        "xxx-large" => px(48.0),
+        "smaller" => Ok(FontSize::Smaller),
+        "larger" => Ok(FontSize::Larger),
+        _ => Err(Invalid),
+    }
+}
+
+fn parse_font_weight(input: &mut Parser<'_>) -> Parsed<FontWeight> {
+    match input.next().map_err(Invalid::from)? {
+        Token::Number { value, .. } if (1.0..=1000.0).contains(value) => {
+            Ok(FontWeight::Weight(*value))
+        }
+        Token::Ident(ident) => match ident.to_ascii_lowercase().as_str() {
+            "normal" => Ok(FontWeight::Weight(400.0)),
+            "bold" => Ok(FontWeight::Weight(700.0)),
+            "bolder" => Ok(FontWeight::Bolder),
+            "lighter" => Ok(FontWeight::Lighter),
+            _ => Err(Invalid),
+        },
+        _ => Err(Invalid),
+    }
+}
+
+fn parse_font_style(input: &mut Parser<'_>) -> Parsed<bool> {
+    let ident = input.expect_ident().map_err(Invalid::from)?;
+    match ident.to_ascii_lowercase().as_str() {
+        "normal" => Ok(false),
+        "italic" | "oblique" => Ok(true),
+        _ => Err(Invalid),
+    }
+}
+
+fn parse_line_height(input: &mut Parser<'_>) -> Parsed<LineHeight> {
+    if input
+        .try_parse(|i| i.expect_ident_matching("normal"))
+        .is_ok()
+    {
+        return Ok(LineHeight::Normal);
+    }
+    if let Ok(number) = input.try_parse(|i| i.expect_number()) {
+        return if number < 0.0 {
+            Err(Invalid)
+        } else {
+            Ok(LineHeight::Number(number))
+        };
+    }
+    if let Ok(fraction) = input.try_parse(|i| i.expect_percentage()) {
+        return if fraction < 0.0 {
+            Err(Invalid)
+        } else {
+            Ok(LineHeight::Percent(fraction))
+        };
+    }
+    Length::parse_non_negative(input).map(LineHeight::Length)
+}
+
+/// `font`: `[style || weight || variant]? size[/line-height] family`.
+/// Omitted parts reset to their initial values. System fonts (`caption`,
+/// ...) are not supported.
+fn parse_font(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) -> Parsed<()> {
+    let (mut italic, mut weight) = (None, None);
+    loop {
+        if input
+            .try_parse(|i| i.expect_ident_matching("normal"))
+            .is_ok()
+            || input
+                .try_parse(|i| i.expect_ident_matching("small-caps"))
+                .is_ok()
+        {
+            continue;
+        }
+        if italic.is_none()
+            && let Ok(v) = input.try_parse(parse_font_style)
+        {
+            italic = Some(v);
+        } else if weight.is_none()
+            && let Ok(v) = input.try_parse(parse_font_weight)
+        {
+            weight = Some(v);
+        } else {
+            break;
+        }
+    }
+    let size = parse_font_size(input)?;
+    let line_height = if input.try_parse(|i| i.expect_delim('/')).is_ok() {
+        parse_line_height(input)?
+    } else {
+        LineHeight::Normal
+    };
+    let family = parse_font_family(input)?;
+    out.extend([
+        PropertyDeclaration::FontStyle(italic.unwrap_or(false)),
+        PropertyDeclaration::FontWeight(weight.unwrap_or(FontWeight::Weight(400.0))),
+        PropertyDeclaration::FontSize(size),
+        PropertyDeclaration::LineHeight(line_height),
+        PropertyDeclaration::FontFamily(family),
+    ]);
+    Ok(())
+}
+
+/// `background`: only the color is used. Images, positions and the rest
+/// are skipped, and a background without a color resets it to transparent.
+fn parse_background(input: &mut Parser<'_>) -> ColorValue {
+    let mut color = ColorValue::Color(crate::values::Color::TRANSPARENT);
+    while !input.is_exhausted() {
+        if let Ok(found) = input.try_parse(ColorValue::parse) {
+            color = found;
+        } else if input.next().is_err() {
+            break;
+        }
+    }
+    color
+}
+
+/// `list-style`: only the marker type is used.
+fn parse_list_style(input: &mut Parser<'_>) -> ListStyleType {
+    let mut style = ListStyleType::Disc;
+    while let Ok(token) = input.next() {
+        if let Token::Ident(ident) = token
+            && let Some(found) = ListStyleType::from_keyword(ident)
+        {
+            style = found;
+        }
+    }
+    style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::values::Color;
+    use PropertyDeclaration as D;
+
+    fn parse(name: &str, value: &str) -> Parsed<Vec<PropertyDeclaration>> {
+        let mut parser = Parser::new(value);
+        let mut out = Vec::new();
+        parse_declaration(name, &mut parser, &mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn parses_keywords_case_insensitively() {
+        assert_eq!(
+            parse("DISPLAY", "Table-Cell"),
+            Ok(vec![D::Display(Display::TableCell)])
+        );
+        assert_eq!(
+            parse("display", "flex"),
+            Ok(vec![D::Display(Display::Block)])
+        );
+        assert!(parse("display", "banana").is_err());
+        assert!(parse("unknown-property", "1").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_garbage() {
+        assert!(parse("color", "red blue").is_err());
+        assert!(parse("width", "10px 20px").is_err());
+    }
+
+    #[test]
+    fn margin_shorthand_expands_like_css() {
+        let pt = |v| Dim::Length(Length::Pt(v));
+        assert_eq!(
+            parse("margin", "1pt 2pt 3pt"),
+            Ok(vec![
+                D::Margin(Side::Top, pt(1.0)),
+                D::Margin(Side::Right, pt(2.0)),
+                D::Margin(Side::Bottom, pt(3.0)),
+                D::Margin(Side::Left, pt(2.0)),
+            ])
+        );
+        assert_eq!(
+            parse("margin", "0 auto").unwrap()[1],
+            D::Margin(Side::Right, Dim::Auto)
+        );
+        assert!(parse("padding", "auto").is_err());
+        assert!(parse("margin", "1pt 2pt 3pt 4pt 5pt").is_err());
+    }
+
+    #[test]
+    fn border_shorthand_accepts_any_order_and_resets() {
+        let red = ColorValue::Color(Color::rgb(255, 0, 0));
+        assert_eq!(
+            parse("border-bottom", "solid red 2pt"),
+            Ok(vec![
+                D::BorderWidth(Side::Bottom, Length::Pt(2.0)),
+                D::BorderStyle(Side::Bottom, BorderStyle::Solid),
+                D::BorderColor(Side::Bottom, red),
+            ])
+        );
+        let all = parse("border", "1px solid").unwrap();
+        assert_eq!(all.len(), 12);
+        assert_eq!(all[2], D::BorderColor(Side::Top, ColorValue::CurrentColor));
+        assert_eq!(
+            parse("border", "none").unwrap()[0],
+            D::BorderWidth(Side::Top, BORDER_WIDTH_MEDIUM)
+        );
+        assert!(parse("border", "").is_err());
+    }
+
+    #[test]
+    fn font_shorthand() {
+        let decls = parse(
+            "font",
+            "italic bold 12pt/1.5 \"Noto Sans\", Arial Black, sans-serif",
+        )
+        .unwrap();
+        assert_eq!(
+            decls,
+            vec![
+                D::FontStyle(true),
+                D::FontWeight(FontWeight::Weight(700.0)),
+                D::FontSize(FontSize::Length(Length::Pt(12.0))),
+                D::LineHeight(LineHeight::Number(1.5)),
+                D::FontFamily(
+                    vec![
+                        FontFamilyName::Named("Noto Sans".into()),
+                        FontFamilyName::Named("Arial Black".into()),
+                        FontFamilyName::Generic(GenericFamily::SansSerif),
+                    ]
+                    .into()
+                ),
+            ]
+        );
+        assert!(parse("font", "bold").is_err());
+    }
+
+    #[test]
+    fn css_wide_keywords_apply_to_every_longhand() {
+        assert_eq!(
+            parse("color", "inherit"),
+            Ok(vec![D::CssWide(LonghandId::Color, CssWide::Inherit)])
+        );
+        assert_eq!(parse("margin", "initial").unwrap().len(), 4);
+        assert_eq!(parse("border", "unset").unwrap().len(), 12);
+    }
+
+    #[test]
+    fn background_shorthand_keeps_only_the_color() {
+        let color = |c| Ok(vec![D::BackgroundColor(ColorValue::Color(c))]);
+        assert_eq!(
+            parse("background", "#eee"),
+            color(Color::rgb(238, 238, 238))
+        );
+        assert_eq!(
+            parse("background", "url(x.png) no-repeat red"),
+            color(Color::rgb(255, 0, 0))
+        );
+        assert_eq!(parse("background", "none"), color(Color::TRANSPARENT));
+    }
+
+    #[test]
+    fn legacy_page_break_aliases() {
+        assert_eq!(
+            parse("page-break-before", "always"),
+            Ok(vec![D::BreakBefore(Break::Page)])
+        );
+        assert_eq!(
+            parse("break-after", "page"),
+            Ok(vec![D::BreakAfter(Break::Page)])
+        );
+    }
+
+    #[test]
+    fn every_longhand_is_listed_once() {
+        let all: Vec<_> = LonghandId::all().collect();
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(all.len(), unique.len());
+        assert_eq!(all.len(), 18 + 4 * 5);
+    }
+}

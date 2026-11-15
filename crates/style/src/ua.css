@@ -1,0 +1,69 @@
+/* The user-agent stylesheet: default styles for HTML elements.
+ *
+ * Based on the rendering section of the HTML standard, limited to the
+ * properties presswork supports. Presentational attributes such as `align`
+ * and `bgcolor` are handled in hints.rs, not here. */
+
+html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, menu, dir, dl, dt, dd,
+pre, blockquote, address, section, article, header, footer, nav, aside, main,
+hr, form, fieldset, legend, figure, figcaption, center, details, summary,
+hgroup, search, noscript, listing, xmp, plaintext, optgroup {
+  display: block;
+}
+
+head, script, style, title, meta, link, base, template, noembed, noframes,
+area, datalist, param, source, track, col, colgroup, [hidden] {
+  display: none;
+}
+
+body { margin: 8px; }
+
+/* Headings and text blocks */
+h1 { font-size: 2em; margin: 0.67em 0; font-weight: bold; }
+h2 { font-size: 1.5em; margin: 0.83em 0; font-weight: bold; }
+h3 { font-size: 1.17em; margin: 1em 0; font-weight: bold; }
+h4 { margin: 1.33em 0; font-weight: bold; }
+h5 { font-size: 0.83em; margin: 1.67em 0; font-weight: bold; }
+h6 { font-size: 0.67em; margin: 2.33em 0; font-weight: bold; }
+p, dl, pre, listing, xmp, plaintext { margin: 1em 0; }
+blockquote, figure { margin: 1em 40px; }
+dd { margin-left: 40px; }
+address { font-style: italic; }
+center { text-align: center; }
+hr { margin: 0.5em auto; border: 1px solid gray; color: gray; }
+
+/* Inline text */
+b, strong { font-weight: bolder; }
+i, em, cite, var, dfn { font-style: italic; }
+pre, code, kbd, samp, tt, listing, xmp, plaintext { font-family: monospace; }
+pre, listing, xmp, plaintext { white-space: pre; }
+small { font-size: smaller; }
+big { font-size: larger; }
+sub, sup { font-size: smaller; }
+a:link { color: #0000ee; }
+nobr { white-space: nowrap; }
+
+/* Lists */
+ul, ol, menu, dir { margin: 1em 0; padding-left: 40px; }
+ul, menu, dir { list-style-type: disc; }
+ol { list-style-type: decimal; }
+li { display: list-item; }
+:is(ul, ol, menu, dir) ul { list-style-type: circle; }
+:is(ul, ol, menu, dir) :is(ul, ol, menu, dir) ul { list-style-type: square; }
+:is(ul, ol, menu, dir, dl) :is(ul, ol, menu, dir, dl) { margin-top: 0; margin-bottom: 0; }
+
+/* Tables */
+table {
+  display: table;
+  border-collapse: separate;
+  border-spacing: 2px;
+  box-sizing: border-box;
+  border-color: gray;
+}
+caption { display: table-caption; text-align: center; }
+thead { display: table-header-group; vertical-align: middle; }
+tbody { display: table-row-group; vertical-align: middle; }
+tfoot { display: table-footer-group; vertical-align: middle; }
+tr { display: table-row; vertical-align: inherit; }
+td, th { display: table-cell; vertical-align: inherit; padding: 1px; }
+th { font-weight: bold; text-align: center; }

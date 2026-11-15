@@ -30,7 +30,7 @@ enum Kind {
     /// `--quiet` silences, along with its values.
     Ignore(usize),
     /// Not implemented yet and changes what ends up on the page (margins,
-    /// headers, footers, page size, ...); dropped with a warning that
+    /// headers, footers, zoom, ...); dropped with a warning that
     /// `--quiet` does not silence, or an error in strict mode.
     Lossy(usize),
 }
@@ -42,6 +42,12 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     // Implemented.
     ("page-size", Some('s'), Pass(1)),
     ("orientation", Some('O'), Pass(1)),
+    ("page-width", None, Pass(1)),
+    ("page-height", None, Pass(1)),
+    ("margin-top", Some('T'), Pass(1)),
+    ("margin-right", Some('R'), Pass(1)),
+    ("margin-bottom", Some('B'), Pass(1)),
+    ("margin-left", Some('L'), Pass(1)),
     ("title", None, Pass(1)),
     ("quiet", Some('q'), Pass(0)),
     ("help", Some('h'), Pass(0)),
@@ -72,12 +78,6 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("license", None, Ignore(0)),
     ("lowquality", Some('l'), Ignore(0)),
     ("manpage", None, Ignore(0)),
-    ("margin-bottom", Some('B'), Lossy(1)),
-    ("margin-left", Some('L'), Lossy(1)),
-    ("margin-right", Some('R'), Lossy(1)),
-    ("margin-top", Some('T'), Lossy(1)),
-    ("page-height", None, Lossy(1)),
-    ("page-width", None, Lossy(1)),
     ("no-pdf-compression", None, Ignore(0)),
     ("read-args-from-stdin", None, Lossy(0)),
     ("readme", None, Ignore(0)),
@@ -333,10 +333,10 @@ mod tests {
     #[test]
     fn drops_unsupported_options_with_their_values() {
         let r = run(&[
-            "--margin-top",
-            "10mm",
-            "-L",
-            "5mm",
+            "--zoom",
+            "1.5",
+            "-d",
+            "300",
             "--cookie",
             "name",
             "value",
@@ -348,14 +348,17 @@ mod tests {
         ]);
         assert_eq!(r.args, ["in.html", "out.pdf"]);
         assert_eq!(r.ignored, ["--cookie", "--outline"]);
-        assert_eq!(r.lossy, ["--margin-top", "-L", "--footer-right"]);
+        assert_eq!(r.lossy, ["--zoom", "-d", "--footer-right"]);
     }
 
     #[test]
     fn passes_supported_options_and_their_values() {
         // `toc` here is a title, not the TOC object keyword.
-        let r = run(&["--title", "toc", "-s", "A4", "-q", "-", "-"]);
-        assert_eq!(r.args, ["--title", "toc", "-s", "A4", "-q", "-", "-"]);
+        let r = run(&["--title", "toc", "-s", "A4", "-T", "10mm", "-q", "-", "-"]);
+        assert_eq!(
+            r.args,
+            ["--title", "toc", "-s", "A4", "-T", "10mm", "-q", "-", "-"]
+        );
         assert!(r.ignored.is_empty() && r.lossy.is_empty());
     }
 
@@ -374,9 +377,9 @@ mod tests {
 
     #[test]
     fn handles_inline_values() {
-        let r = run(&["--margin-top=1in", "--page-size=A5", "a", "b"]);
+        let r = run(&["--zoom=2", "--page-size=A5", "a", "b"]);
         assert_eq!(r.args, ["--page-size=A5", "a", "b"]);
-        assert_eq!(r.lossy, ["--margin-top"]);
+        assert_eq!(r.lossy, ["--zoom"]);
     }
 
     #[test]

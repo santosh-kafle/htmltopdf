@@ -1,277 +1,330 @@
-//! Computed styles.
-//!
-//! Until the cascade exists, styles come only from the built-in defaults
-//! below: a small subset of the HTML user-agent stylesheet, plus the
-//! presentational attributes (`align`) that wkhtmltopdf-era templates use.
-//! Author stylesheets and `style=""` are not applied yet.
+//! Computed styles: the result of the cascade for one element.
 
-use presswork_dom::ElementData;
+use std::sync::Arc;
 
-/// The `display` value, limited to what layout supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Display {
-    None,
-    Block,
-    Inline,
-    ListItem,
-    Table,
-    TableRowGroup,
-    TableRow,
-    TableCell,
-    TableCaption,
-}
-
-impl Display {
-    /// Whether the box takes part in block layout (as opposed to inline).
-    pub fn is_block_level(self) -> bool {
-        !matches!(self, Display::Inline | Display::None)
-    }
-}
-
-/// A generic font family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FontFamily {
-    Serif,
-    SansSerif,
-    Monospace,
-}
-
-/// Horizontal alignment of inline content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextAlign {
-    Left,
-    Right,
-    Center,
-}
-
-/// Sizes in points for the four sides of a box.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Edges {
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
-    pub left: f32,
-}
-
-/// The style of one element, with every length resolved to points.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ComputedStyle {
-    pub display: Display,
-    pub font_family: FontFamily,
-    /// Font size in points.
-    pub font_size: f32,
-    /// Font weight, 100 to 900.
-    pub font_weight: f32,
-    pub italic: bool,
-    /// `white-space: pre`: keep spaces and line breaks, never wrap.
-    pub preformatted: bool,
-    pub text_align: TextAlign,
-    /// Content language from the `lang` attribute, e.g. `"ne"`. Inherited.
-    /// Used for font fallback and shaping.
-    pub lang: Option<String>,
-    pub margin: Edges,
-    pub padding: Edges,
-}
+use crate::properties::{
+    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, CssWide, Display,
+    FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType, LonghandId,
+    PropertyDeclaration, TextAlign, VerticalAlign, WhiteSpace,
+};
+use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
 
 /// The browser default font size: 16px.
 pub const DEFAULT_FONT_SIZE: f32 = 12.0;
 
-/// Points per CSS pixel.
-const PX: f32 = 0.75;
+/// One side of a border.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderSide {
+    /// Specified width in points. See [`BorderSide::used_width`].
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: ColorValue,
+}
+
+impl BorderSide {
+    /// The width the border takes up: zero unless its style is visible.
+    pub fn used_width(&self) -> f32 {
+        if self.style.is_visible() {
+            self.width
+        } else {
+            0.0
+        }
+    }
+}
+
+impl Default for BorderSide {
+    fn default() -> Self {
+        Self {
+            width: BORDER_WIDTH_MEDIUM.to_pt(0.0, 0.0),
+            style: BorderStyle::None,
+            color: ColorValue::CurrentColor,
+        }
+    }
+}
+
+/// The style of one element, with every font-relative length resolved to
+/// points. Percentages and `auto` remain for layout to resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedStyle {
+    pub display: Display,
+    pub color: Color,
+    pub background_color: Color,
+    pub font_family: Arc<[FontFamilyName]>,
+    /// Font size in points.
+    pub font_size: f32,
+    /// Font weight, 1 to 1000.
+    pub font_weight: f32,
+    pub italic: bool,
+    /// `Length` is in points here.
+    pub line_height: LineHeight,
+    pub text_align: TextAlign,
+    pub white_space: WhiteSpace,
+    pub margin: Sides<Dimension>,
+    pub padding: Sides<Dimension>,
+    pub border: Sides<BorderSide>,
+    pub width: Dimension,
+    pub box_sizing: BoxSizing,
+    pub vertical_align: VerticalAlign,
+    pub border_collapse: BorderCollapse,
+    /// Space between table cells, in points.
+    pub border_spacing: f32,
+    pub list_style_type: ListStyleType,
+    pub break_before: Break,
+    pub break_after: Break,
+    /// Content language from the `lang` attribute, e.g. `"ne"`. Inherited.
+    /// Not a CSS property; used for font fallback and shaping.
+    pub lang: Option<Arc<str>>,
+    /// The root element's font size, for `rem`. Inherited.
+    pub root_font_size: f32,
+}
 
 impl ComputedStyle {
-    /// The style of the document root's parent: inherited defaults only.
+    /// Every property at its initial value.
     pub fn initial() -> Self {
         Self {
-            display: Display::Block,
-            font_family: FontFamily::Serif,
+            display: Display::Inline,
+            color: Color::BLACK,
+            background_color: Color::TRANSPARENT,
+            font_family: Arc::new([FontFamilyName::Generic(GenericFamily::Serif)]),
             font_size: DEFAULT_FONT_SIZE,
             font_weight: 400.0,
             italic: false,
-            preformatted: false,
+            line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
+            white_space: WhiteSpace::Normal,
+            margin: Sides::uniform(Dimension::ZERO),
+            padding: Sides::uniform(Dimension::ZERO),
+            border: Sides::uniform(BorderSide::default()),
+            width: Dimension::Auto,
+            box_sizing: BoxSizing::ContentBox,
+            vertical_align: VerticalAlign::Baseline,
+            border_collapse: BorderCollapse::Separate,
+            border_spacing: 0.0,
+            list_style_type: ListStyleType::Disc,
+            break_before: Break::Auto,
+            break_after: Break::Auto,
             lang: None,
-            margin: Edges::default(),
-            padding: Edges::default(),
+            root_font_size: DEFAULT_FONT_SIZE,
         }
     }
 
-    /// Computes the style of `element`, whose parent has style `parent`.
-    pub fn for_element(parent: &ComputedStyle, element: &ElementData) -> Self {
-        // Inherited properties start from the parent; the rest reset.
-        let mut style = Self {
-            display: Display::Inline,
-            margin: Edges::default(),
-            padding: Edges::default(),
-            ..parent.clone()
-        };
-        let em = |v: f32, size: f32| v * size;
-
-        let name = element.name.as_str();
-        style.display = display_for(name);
-
-        // Font size first, since `em` margins depend on it.
-        let scale = match name {
-            "h1" => Some(2.0),
-            "h2" => Some(1.5),
-            "h3" => Some(1.17),
-            "h5" => Some(0.83),
-            "h6" => Some(0.67),
-            "small" | "sub" | "sup" => Some(0.83),
-            "big" => Some(1.2),
-            _ => None,
-        };
-        if let Some(scale) = scale {
-            style.font_size = parent.font_size * scale;
+    /// The starting style of a child of `parent`: inherited properties come
+    /// from the parent, the rest are initial.
+    pub fn inheriting(parent: &ComputedStyle) -> Self {
+        let mut style = Self::initial();
+        for id in LonghandId::all().filter(|id| id.is_inherited()) {
+            style.copy_longhand(id, parent);
         }
-        let size = style.font_size;
-
-        match name {
-            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "b" | "strong" | "th" => {
-                style.font_weight = 700.0;
-            }
-            "i" | "em" | "cite" | "var" | "dfn" | "address" => style.italic = true,
-            "pre" | "code" | "kbd" | "samp" | "tt" => style.font_family = FontFamily::Monospace,
-            _ => {}
-        }
-        if name == "pre" {
-            style.preformatted = true;
-        }
-
-        let vertical = match name {
-            "p" | "ul" | "ol" | "dl" | "pre" | "blockquote" | "figure" => Some(1.0),
-            "h1" => Some(0.67),
-            "h2" => Some(0.83),
-            "h3" => Some(1.0),
-            "h4" => Some(1.33),
-            "h5" => Some(1.67),
-            "h6" => Some(2.33),
-            "hr" => Some(0.5),
-            _ => None,
-        };
-        if let Some(v) = vertical {
-            style.margin.top = em(v, size);
-            style.margin.bottom = em(v, size);
-        }
-        match name {
-            "body" => style.margin = uniform(8.0 * PX),
-            "blockquote" | "figure" => {
-                style.margin.left = 40.0 * PX;
-                style.margin.right = 40.0 * PX;
-            }
-            "dd" => style.margin.left = 40.0 * PX,
-            "ul" | "ol" => style.padding.left = 40.0 * PX,
-            "td" | "th" => style.padding = uniform(1.0 * PX),
-            _ => {}
-        }
-
-        if let Some(lang) = element.attr("lang").or_else(|| element.attr("xml:lang")) {
-            let lang = lang.trim();
-            style.lang = (!lang.is_empty()).then(|| lang.to_owned());
-        }
-
-        // Alignment: `<center>`, `<th>` and the `align` attribute.
-        match name {
-            "center" | "th" => style.text_align = TextAlign::Center,
-            "table" => style.text_align = TextAlign::Left,
-            _ => {}
-        }
-        if let Some(align) = element.attr("align") {
-            match align.to_ascii_lowercase().as_str() {
-                "left" => style.text_align = TextAlign::Left,
-                "right" => style.text_align = TextAlign::Right,
-                "center" | "middle" => style.text_align = TextAlign::Center,
-                _ => {}
-            }
-        }
+        style.lang = parent.lang.clone();
+        style.root_font_size = parent.root_font_size;
         style
     }
-}
 
-fn uniform(v: f32) -> Edges {
-    Edges {
-        top: v,
-        right: v,
-        bottom: v,
-        left: v,
-    }
-}
-
-fn display_for(name: &str) -> Display {
-    match name {
-        "head" | "script" | "style" | "title" | "meta" | "link" | "base" | "template"
-        | "noembed" | "noframes" | "area" | "datalist" | "param" | "source" | "track" => {
-            Display::None
+    /// Copies the computed value of one property from `other`.
+    pub fn copy_longhand(&mut self, id: LonghandId, other: &ComputedStyle) {
+        use LonghandId as L;
+        match id {
+            L::Display => self.display = other.display,
+            L::Color => self.color = other.color,
+            L::BackgroundColor => self.background_color = other.background_color,
+            L::FontFamily => self.font_family = Arc::clone(&other.font_family),
+            L::FontSize => self.font_size = other.font_size,
+            L::FontWeight => self.font_weight = other.font_weight,
+            L::FontStyle => self.italic = other.italic,
+            L::LineHeight => self.line_height = other.line_height,
+            L::TextAlign => self.text_align = other.text_align,
+            L::WhiteSpace => self.white_space = other.white_space,
+            L::Margin(side) => self.margin.set(side, other.margin.get(side)),
+            L::Padding(side) => self.padding.set(side, other.padding.get(side)),
+            L::BorderWidth(side) => self.border_mut(side).width = other.border.get(side).width,
+            L::BorderStyle(side) => self.border_mut(side).style = other.border.get(side).style,
+            L::BorderColor(side) => self.border_mut(side).color = other.border.get(side).color,
+            L::Width => self.width = other.width,
+            L::BoxSizing => self.box_sizing = other.box_sizing,
+            L::VerticalAlign => self.vertical_align = other.vertical_align,
+            L::BorderCollapse => self.border_collapse = other.border_collapse,
+            L::BorderSpacing => self.border_spacing = other.border_spacing,
+            L::ListStyleType => self.list_style_type = other.list_style_type,
+            L::BreakBefore => self.break_before = other.break_before,
+            L::BreakAfter => self.break_after = other.break_after,
         }
-        "html" | "body" | "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol"
-        | "dl" | "dt" | "dd" | "pre" | "blockquote" | "address" | "section" | "article"
-        | "header" | "footer" | "nav" | "aside" | "main" | "hr" | "form" | "fieldset"
-        | "figure" | "figcaption" | "center" | "legend" | "details" | "summary" | "menu"
-        | "dir" | "hgroup" | "search" | "noscript" => Display::Block,
-        "li" => Display::ListItem,
-        "table" => Display::Table,
-        "thead" | "tbody" | "tfoot" => Display::TableRowGroup,
-        "tr" => Display::TableRow,
-        "td" | "th" => Display::TableCell,
-        "caption" => Display::TableCaption,
-        _ => Display::Inline,
+    }
+
+    fn border_mut(&mut self, side: Side) -> &mut BorderSide {
+        match side {
+            Side::Top => &mut self.border.top,
+            Side::Right => &mut self.border.right,
+            Side::Bottom => &mut self.border.bottom,
+            Side::Left => &mut self.border.left,
+        }
+    }
+
+    /// Applies one declaration, computing its value. `parent` is the
+    /// parent's computed style (or the initial style for the root).
+    ///
+    /// Font-relative lengths use `self.font_size`, so the cascade applies
+    /// `font-size` declarations before all others.
+    pub fn apply(&mut self, declaration: &PropertyDeclaration, parent: &ComputedStyle) {
+        use PropertyDeclaration as D;
+        let (font_size, root) = (self.font_size, self.root_font_size);
+        let pt = |length: Length| length.to_pt(font_size, root);
+        match declaration {
+            D::Display(v) => self.display = *v,
+            D::Color(v) => self.color = v.resolve(parent.color),
+            D::BackgroundColor(v) => self.background_color = v.resolve(self.color),
+            D::FontFamily(v) => self.font_family = Arc::clone(v),
+            D::FontSize(v) => {
+                self.font_size = match *v {
+                    // `em` in font-size is relative to the parent's size.
+                    FontSize::Length(l) => l.to_pt(parent.font_size, root),
+                    FontSize::Percent(p) => parent.font_size * p,
+                    FontSize::Smaller => parent.font_size / 1.2,
+                    FontSize::Larger => parent.font_size * 1.2,
+                };
+            }
+            D::FontWeight(v) => {
+                self.font_weight = match *v {
+                    FontWeight::Weight(w) => w,
+                    FontWeight::Bolder => match parent.font_weight {
+                        w if w < 350.0 => 400.0,
+                        w if w < 550.0 => 700.0,
+                        _ => 900.0,
+                    },
+                    FontWeight::Lighter => match parent.font_weight {
+                        w if w < 550.0 => 100.0,
+                        w if w < 750.0 => 400.0,
+                        _ => 700.0,
+                    },
+                };
+            }
+            D::FontStyle(v) => self.italic = *v,
+            D::LineHeight(v) => {
+                self.line_height = match *v {
+                    LineHeight::Length(l) => LineHeight::Length(Length::Pt(pt(l))),
+                    LineHeight::Percent(p) => LineHeight::Length(Length::Pt(font_size * p)),
+                    other => other,
+                };
+            }
+            D::TextAlign(v) => self.text_align = *v,
+            D::WhiteSpace(v) => self.white_space = *v,
+            D::Margin(side, v) => self.margin.set(*side, v.compute(font_size, root)),
+            D::Padding(side, v) => self.padding.set(*side, v.compute(font_size, root)),
+            D::BorderWidth(side, v) => self.border_mut(*side).width = pt(*v),
+            D::BorderStyle(side, v) => self.border_mut(*side).style = *v,
+            D::BorderColor(side, v) => self.border_mut(*side).color = *v,
+            D::Width(v) => self.width = v.compute(font_size, root),
+            D::BoxSizing(v) => self.box_sizing = *v,
+            D::VerticalAlign(v) => self.vertical_align = *v,
+            D::BorderCollapse(v) => self.border_collapse = *v,
+            D::BorderSpacing(v) => self.border_spacing = pt(*v),
+            D::ListStyleType(v) => self.list_style_type = *v,
+            D::BreakBefore(v) => self.break_before = *v,
+            D::BreakAfter(v) => self.break_after = *v,
+            D::CssWide(id, keyword) => {
+                let inherit = match keyword {
+                    CssWide::Inherit => true,
+                    CssWide::Initial => false,
+                    CssWide::Unset => id.is_inherited(),
+                };
+                if inherit {
+                    self.copy_longhand(*id, parent);
+                } else {
+                    self.copy_longhand(*id, &ComputedStyle::initial());
+                }
+            }
+        }
+    }
+
+    /// The color of the border on `side`, with `currentcolor` resolved.
+    pub fn border_color(&self, side: Side) -> Color {
+        self.border.get(side).color.resolve(self.color)
+    }
+
+    /// The used border widths in points.
+    pub fn border_widths(&self) -> Sides<f32> {
+        self.border.map(|b| b.used_width())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use presswork_dom::Attribute;
+    use crate::values::Dim;
+    use PropertyDeclaration as D;
 
-    fn element(name: &str, attrs: &[(&str, &str)]) -> ElementData {
-        ElementData {
-            name: name.into(),
-            namespace: String::new(),
-            attributes: attrs
-                .iter()
-                .map(|(n, v)| Attribute {
-                    name: (*n).into(),
-                    value: (*v).into(),
-                })
-                .collect(),
-        }
+    #[test]
+    fn inherits_only_inherited_properties() {
+        let mut parent = ComputedStyle::initial();
+        parent.color = Color::rgb(255, 0, 0);
+        parent.font_size = 20.0;
+        parent.margin.top = Dimension::Pt(5.0);
+        parent.background_color = Color::WHITE;
+        parent.lang = Some("ne".into());
+
+        let child = ComputedStyle::inheriting(&parent);
+        assert_eq!(child.color, parent.color);
+        assert_eq!(child.font_size, 20.0);
+        assert_eq!(child.lang.as_deref(), Some("ne"));
+        assert_eq!(child.margin.top, Dimension::ZERO);
+        assert_eq!(child.background_color, Color::TRANSPARENT);
     }
 
     #[test]
-    fn headings_are_bold_and_scaled() {
-        let root = ComputedStyle::initial();
-        let h1 = ComputedStyle::for_element(&root, &element("h1", &[]));
-        assert_eq!(h1.display, Display::Block);
-        assert_eq!(h1.font_size, 24.0);
-        assert_eq!(h1.font_weight, 700.0);
-        assert!((h1.margin.top - 0.67 * 24.0).abs() < 1e-4);
+    fn em_resolves_against_the_right_font_size() {
+        let mut parent = ComputedStyle::initial();
+        parent.font_size = 10.0;
+        let mut style = ComputedStyle::inheriting(&parent);
+        // font-size: 2em is relative to the parent.
+        style.apply(&D::FontSize(FontSize::Length(Length::Em(2.0))), &parent);
+        assert_eq!(style.font_size, 20.0);
+        // Other properties use the element's own font size.
+        style.apply(
+            &D::Margin(Side::Left, Dim::Length(Length::Em(1.5))),
+            &parent,
+        );
+        assert_eq!(style.margin.left, Dimension::Pt(30.0));
+        style.apply(&D::LineHeight(LineHeight::Percent(1.5)), &parent);
+        assert_eq!(style.line_height, LineHeight::Length(Length::Pt(30.0)));
     }
 
     #[test]
-    fn inherits_font_but_not_margins() {
-        let root = ComputedStyle::initial();
-        let p = ComputedStyle::for_element(&root, &element("p", &[]));
-        let b = ComputedStyle::for_element(&p, &element("b", &[]));
-        assert_eq!(b.display, Display::Inline);
-        assert_eq!(b.font_weight, 700.0);
-        assert_eq!(b.margin, Edges::default());
+    fn css_wide_keywords() {
+        let mut parent = ComputedStyle::initial();
+        parent.margin.top = Dimension::Pt(7.0);
+        parent.color = Color::rgb(1, 2, 3);
+        let mut style = ComputedStyle::inheriting(&parent);
+
+        style.apply(
+            &D::CssWide(LonghandId::Margin(Side::Top), CssWide::Inherit),
+            &parent,
+        );
+        assert_eq!(style.margin.top, Dimension::Pt(7.0));
+        style.apply(&D::CssWide(LonghandId::Color, CssWide::Initial), &parent);
+        assert_eq!(style.color, Color::BLACK);
+        style.apply(&D::CssWide(LonghandId::Color, CssWide::Unset), &parent);
+        assert_eq!(style.color, parent.color);
     }
 
     #[test]
-    fn align_attribute_sets_text_align() {
-        let root = ComputedStyle::initial();
-        let td = ComputedStyle::for_element(&root, &element("td", &[("align", "RIGHT")]));
-        assert_eq!(td.text_align, TextAlign::Right);
-        let th = ComputedStyle::for_element(&root, &element("th", &[]));
-        assert_eq!(th.text_align, TextAlign::Center);
+    fn border_width_is_zero_without_a_style() {
+        let mut style = ComputedStyle::initial();
+        assert_eq!(style.border_widths().top, 0.0);
+        style.apply(
+            &D::BorderStyle(Side::Top, BorderStyle::Solid),
+            &ComputedStyle::initial(),
+        );
+        assert_eq!(style.border_widths().top, 2.25);
+        assert_eq!(style.border_color(Side::Top), Color::BLACK);
     }
 
     #[test]
-    fn hidden_elements() {
-        let root = ComputedStyle::initial();
-        for name in ["head", "script", "style", "template"] {
-            let s = ComputedStyle::for_element(&root, &element(name, &[]));
-            assert_eq!(s.display, Display::None, "{name}");
-        }
+    fn bolder_and_lighter_step_from_the_parent() {
+        let mut parent = ComputedStyle::initial();
+        let mut style = ComputedStyle::inheriting(&parent);
+        style.apply(&D::FontWeight(FontWeight::Bolder), &parent);
+        assert_eq!(style.font_weight, 700.0);
+        parent.font_weight = 700.0;
+        style.apply(&D::FontWeight(FontWeight::Lighter), &parent);
+        assert_eq!(style.font_weight, 400.0);
     }
 }

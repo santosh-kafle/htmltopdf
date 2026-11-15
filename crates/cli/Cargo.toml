@@ -15,6 +15,7 @@ path = "src/main.rs"
 presswork-dom.workspace = true
 presswork-layout.workspace = true
 presswork-paint.workspace = true
+presswork-style.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 url.workspace = true

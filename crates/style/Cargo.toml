@@ -9,6 +9,9 @@ license.workspace = true
 
 [dependencies]
 presswork-dom.workspace = true
+cssparser.workspace = true
+selectors.workspace = true
+precomputed-hash.workspace = true
 
 [lints]
 workspace = true

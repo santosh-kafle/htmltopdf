@@ -1,18 +1,30 @@
 //! CSS parsing, cascade and computed styles.
 //!
-//! Responsibilities of this crate:
+//! - [`stylesheet`] parses stylesheets and `style=""` attributes with
+//!   `cssparser`; [`properties`] parses individual declarations.
+//! - [`selector`] matches selectors against `presswork_dom` documents with
+//!   the `selectors` crate.
+//! - [`cascade`] collects the declarations that apply to an element (from
+//!   the built-in user-agent stylesheet, presentational attributes, author
+//!   stylesheets and `style=""`), orders them by origin, importance,
+//!   specificity and source order, and produces a [`ComputedStyle`].
 //!
-//! 1. Parse author stylesheets (`<style>`, `<link>`, `style=""`) and the
-//!    built-in user-agent stylesheet.
-//! 2. Match selectors against `presswork_dom::Document` nodes.
-//! 3. Run the cascade (origin, specificity, source order, `!important`) and
-//!    inheritance to produce a computed style for every element.
+//! Start with [`Stylist::for_document`], then call [`Stylist::style`] for
+//! each element, top down.
 
-//!
-//! Today only the built-in defaults in [`computed`] exist.
-
+pub mod cascade;
 pub mod computed;
+mod hints;
+pub mod properties;
+mod selector;
+pub mod stylesheet;
 pub mod values;
 
-pub use computed::{ComputedStyle, Display, Edges, FontFamily, TextAlign};
-pub use values::{Color, Length};
+pub use cascade::Stylist;
+pub use computed::{BorderSide, ComputedStyle, DEFAULT_FONT_SIZE};
+pub use properties::{
+    BorderCollapse, BorderStyle, BoxSizing, Break, Display, FontFamilyName, GenericFamily,
+    LineHeight, ListStyleType, TextAlign, VerticalAlign, WhiteSpace,
+};
+pub use stylesheet::{PageRule, PageSizeValue};
+pub use values::{Color, Dimension, Length, Side, Sides};

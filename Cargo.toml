@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 license = "MIT OR Apache-2.0"
 
@@ -21,6 +21,9 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 regex = "1"
 html5ever = "0.40"
+cssparser = "0.38"
+selectors = "0.43"
+precomputed-hash = "0.1"
 parley = "0.13"
 krilla = "0.8"
 url = "2.5"

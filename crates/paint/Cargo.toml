@@ -13,6 +13,7 @@ krilla.workspace = true
 
 [dev-dependencies]
 presswork-dom.workspace = true
+presswork-style.workspace = true
 
 [lints]
 workspace = true
