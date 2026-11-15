@@ -12,6 +12,7 @@ name = "presswork"
 path = "src/main.rs"
 
 [dependencies]
+presswork-dom.workspace = true
 presswork-layout.workspace = true
 presswork-paint.workspace = true
 anyhow.workspace = true

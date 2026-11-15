@@ -9,6 +9,10 @@ license.workspace = true
 
 [dependencies]
 presswork-layout.workspace = true
+krilla.workspace = true
+
+[dev-dependencies]
+presswork-dom.workspace = true
 
 [lints]
 workspace = true

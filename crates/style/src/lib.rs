@@ -8,6 +8,11 @@
 //! 3. Run the cascade (origin, specificity, source order, `!important`) and
 //!    inheritance to produce a computed style for every element.
 
+//!
+//! Today only the built-in defaults in [`computed`] exist.
+
+pub mod computed;
 pub mod values;
 
+pub use computed::{ComputedStyle, Display, Edges, FontFamily, TextAlign};
 pub use values::{Color, Length};

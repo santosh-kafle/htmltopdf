@@ -11,6 +11,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
+presswork-dom = { path = "crates/dom" }
+presswork-style = { path = "crates/style" }
 presswork-layout = { path = "crates/layout" }
 presswork-paint = { path = "crates/paint" }
 
@@ -18,6 +20,9 @@ presswork-paint = { path = "crates/paint" }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 regex = "1"
+html5ever = "0.40"
+parley = "0.13"
+krilla = "0.8"
 url = "2.5"
 
 [workspace.lints.rust]

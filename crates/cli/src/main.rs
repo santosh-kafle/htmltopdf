@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
+use presswork_layout::{Engine, LayoutOptions};
 use presswork_layout::{Orientation, PageSize};
 use presswork_paint::PdfOptions;
 
@@ -171,8 +172,20 @@ impl Cli {
     }
 }
 
-fn render(_html: &[u8], _options: &PdfOptions) -> Result<Vec<u8>> {
-    bail!("rendering is not implemented yet");
+/// Runs the whole pipeline: parse, lay out, write the PDF.
+fn render(html: &[u8], cli: &Cli) -> Result<Vec<u8>> {
+    let doc = presswork_dom::parse_html(html);
+    let layout = LayoutOptions {
+        page_size: cli.page_size.size(cli.orientation),
+        ..LayoutOptions::default()
+    };
+    let pages = Engine::new().layout(&doc, &layout);
+    let pdf = PdfOptions {
+        // wkhtmltopdf uses the document's <title> unless --title is given.
+        title: cli.title.clone().or_else(|| doc.title()),
+        author: None,
+    };
+    Ok(presswork_paint::render_pdf(&pages, &pdf)?)
 }
 
 fn main() -> Result<()> {
@@ -188,13 +201,7 @@ fn main() -> Result<()> {
 
     let (source, sink) = cli.io()?;
     let html = source.read()?;
-    let options = PdfOptions {
-        page_size: cli.page_size,
-        orientation: cli.orientation,
-        title: cli.title,
-        author: None,
-    };
-    let pdf = render(&html, &options)?;
+    let pdf = render(&html, &cli)?;
     sink.write(&pdf)
 }
 

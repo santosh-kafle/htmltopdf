@@ -5,11 +5,21 @@ certificates, written in Rust with no browser dependency. It aims to be a
 replacement for [wkhtmltopdf](https://wkhtmltopdf.org/), which is no longer
 maintained, and accepts the same command line.
 
-> **Status: early development. presswork does not produce PDFs yet.**
-> The command line works; the rendering engine does not exist yet.
+> **Status: early development.** presswork produces real PDFs from simple
+> HTML, but author CSS is not applied yet: documents are rendered with
+> browser-default styles only.
 
 ## What works today
 
+- **HTML to PDF, end to end.** HTML5 parsing, paragraphs, headings, lists,
+  line breaks, `<hr>`, and simple tables (equal-width columns, `colspan`,
+  `align`). Long documents break across pages between lines and table rows.
+- **Text in any script the system has fonts for.** Text is shaped with
+  HarfBuzz-compatible shaping, so Devanagari conjuncts and vowel signs render
+  correctly, and fonts fall back by script. Fonts are embedded and subsetted,
+  and the PDF text can be searched and copied.
+- **Document metadata.** The `<title>` becomes the PDF title unless `--title`
+  is given.
 - **wkhtmltopdf's command line.** Every documented wkhtmltopdf 0.12.6 option
   is recognised, so invocations from wrapper libraries such as `pdfkit`,
   `wicked_pdf` and `snappy` parse:
@@ -30,8 +40,8 @@ maintained, and accepts the same command line.
   (A0–A9, B0–B10, C5E, Comm10E, DLE, Executive, Folio, Ledger, Legal, Letter,
   Tabloid). `-O` / `--orientation` and `--title` are also supported.
 
-Running a conversion currently ends with
-`Error: rendering is not implemented yet`.
+Not yet: author CSS (`<style>`, `style=""`), images, borders and
+backgrounds, and the wkhtmltopdf margin, header and footer options.
 
 ## Usage
 
@@ -51,6 +61,8 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 - **Standards-based layout.** Output follows the CSS specifications, not
   QtWebKit, so templates tuned for wkhtmltopdf's rendering (for example its
   smart shrinking) may lay out differently.
+- **System fonts.** Fonts come from the system's font configuration, so
+  output can differ between machines with different fonts installed.
 - **One input document.** Multiple inputs, cover pages and `toc` objects are
   not supported yet.
 
