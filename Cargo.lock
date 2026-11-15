@@ -1066,6 +1066,7 @@ dependencies = [
 name = "presswork-layout"
 version = "0.1.0"
 dependencies = [
+ "fontique",
  "parley",
  "presswork-dom",
  "presswork-style",

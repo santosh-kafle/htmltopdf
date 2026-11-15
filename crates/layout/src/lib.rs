@@ -81,6 +81,15 @@ impl Engine {
         }
     }
 
+    /// Whether the system provided any fonts. Without them, text is laid
+    /// out but no glyphs can be drawn.
+    ///
+    /// On Linux this is false when fontconfig is not installed: it is
+    /// loaded at runtime, not linked.
+    pub fn has_system_fonts(&self) -> bool {
+        self.generics.any()
+    }
+
     /// Lays out `doc`, styled by `styles`, into pages.
     pub fn layout(
         &mut self,
@@ -110,3 +119,18 @@ impl Engine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod engine_tests {
+    use super::Engine;
+
+    /// The test machines have fonts; if this fails, every text test would
+    /// fail in confusing ways, so fail here first with a clear message.
+    #[test]
+    fn system_fonts_are_available() {
+        assert!(
+            Engine::new().has_system_fonts(),
+            "no system fonts found: install fontconfig and a font package"
+        );
+    }
+}

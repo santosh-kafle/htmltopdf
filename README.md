@@ -88,7 +88,10 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
   `@media screen` rules do not apply. wkhtmltopdf uses `screen` unless
   `--print-media-type` is given.
 - **System fonts.** Fonts come from the system's font configuration, so
-  output can differ between machines with different fonts installed.
+  output can differ between machines with different fonts installed. On
+  Linux, fontconfig is loaded at runtime: building needs no fontconfig
+  development package, but rendering text needs fontconfig and fonts
+  installed (presswork warns if it finds none).
 - **One input document.** Multiple inputs, cover pages and `toc` objects are
   not supported yet.
 

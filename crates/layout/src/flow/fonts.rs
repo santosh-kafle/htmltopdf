@@ -32,6 +32,12 @@ impl GenericFonts {
         }
     }
 
+    /// Whether any generic family resolved to a font. If none did, the
+    /// system has no usable fonts (or fontconfig could not be loaded).
+    pub fn any(&self) -> bool {
+        self.serif.is_some() || self.sans_serif.is_some() || self.monospace.is_some()
+    }
+
     /// The parley font stack for a computed `font-family` list.
     pub fn stack<'a>(&'a self, families: &'a [FontFamilyName]) -> FamilyStack<'a> {
         let names = families

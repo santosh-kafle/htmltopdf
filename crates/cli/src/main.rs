@@ -174,7 +174,15 @@ fn render(html: &[u8], cli: &Cli) -> Result<Vec<u8>> {
     let doc = presswork_dom::parse_html(html);
     let styles = Stylist::for_document(&doc);
     let layout = cli.page.layout_options(styles.page());
-    let pages = Engine::new().layout(&doc, &styles, &layout);
+    let mut engine = Engine::new();
+    if !engine.has_system_fonts() {
+        // Always shown: the PDF would have no visible text.
+        eprintln!(
+            "warning: no system fonts found, so text will not be drawn; \
+             install fontconfig and at least one font package"
+        );
+    }
+    let pages = engine.layout(&doc, &styles, &layout);
     let pdf = PdfOptions {
         // wkhtmltopdf uses the document's <title> unless --title is given.
         title: cli.title.clone().or_else(|| doc.title()),
