@@ -30,6 +30,9 @@ parley = "0.13"
 fontique = { version = "0.13", features = ["fontconfig-dlopen"] }
 krilla = "0.8"
 url = "2.5"
+data-url = "0.3"
+# Only the formats krilla can embed.
+imagesize = { version = "0.14", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

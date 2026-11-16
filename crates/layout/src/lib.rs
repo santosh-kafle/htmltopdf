@@ -12,6 +12,9 @@
 //! The output is a list of positioned items per page, consumed by
 //! `presswork-paint`. All geometry is expressed in typographic points
 //! (1pt = 1/72 in).
+//!
+//! Images are loaded through a [`Loader`], which decides what may be read;
+//! layout itself never touches files or the network.
 
 mod flow;
 pub mod fragment;
@@ -19,13 +22,17 @@ pub mod geometry;
 pub mod page;
 mod paginate;
 
+use std::collections::HashMap;
 use std::fmt;
 
 use parley::{FontContext, LayoutContext};
 use presswork_dom::Document;
+pub use presswork_dom::resource::{DataUrls, LoadError, Loader};
 use presswork_style::Stylist;
 
-pub use fragment::{Color, Fill, FontData, Glyph, Item, Page, TextRun};
+pub use fragment::{
+    Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Page, TextRun,
+};
 pub use geometry::{EdgeSizes, Point, Rect, Size};
 pub use page::{Orientation, PageSize};
 
@@ -47,6 +54,23 @@ impl Default for LayoutOptions {
             margins: EdgeSizes::uniform(DEFAULT_MARGIN),
         }
     }
+}
+
+/// The result of [`Engine::layout`].
+#[derive(Debug)]
+pub struct Output {
+    pub pages: Vec<Page>,
+    /// Resources that could not be loaded, each listed once. The document
+    /// is laid out without them.
+    pub failures: Vec<LoadFailure>,
+}
+
+/// A resource that could not be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadFailure {
+    /// The URL as written in the document, shortened if very long.
+    pub url: String,
+    pub error: LoadError,
 }
 
 /// Lays out documents. Holds the font database, which is expensive to
@@ -90,13 +114,15 @@ impl Engine {
         self.generics.any()
     }
 
-    /// Lays out `doc`, styled by `styles`, into pages.
+    /// Lays out `doc`, styled by `styles`, into pages. Images come from
+    /// `loader`; pass [`DataUrls`] to load only inline `data:` images.
     pub fn layout(
         &mut self,
         doc: &Document,
         styles: &Stylist,
         options: &LayoutOptions,
-    ) -> Vec<Page> {
+        loader: &dyn Loader,
+    ) -> Output {
         let margins = options.margins;
         let width = (options.page_size.width - margins.left - margins.right).max(0.0);
 
@@ -106,6 +132,9 @@ impl Engine {
             texts: &mut self.texts,
             doc,
             styles,
+            loader,
+            images: HashMap::new(),
+            failures: Vec::new(),
         };
         let mut flow = flow::Flow::new(&mut context);
         if let Some(root) = doc.document_element() {
@@ -113,7 +142,10 @@ impl Engine {
             flow.block(root, &style, 0.0, width);
         }
         let (canvas, _height) = flow.finish();
-        paginate::paginate(canvas, options.page_size, margins)
+        Output {
+            pages: paginate::paginate(canvas, options.page_size, margins),
+            failures: context.failures,
+        }
     }
 }
 

@@ -22,6 +22,7 @@ pub struct Page {
 pub enum Item {
     Text(TextRun),
     Fill(Fill),
+    Image(Image),
 }
 
 impl Item {
@@ -29,6 +30,7 @@ impl Item {
         let origin = match &mut self {
             Item::Text(run) => &mut run.origin,
             Item::Fill(fill) => &mut fill.rect.origin,
+            Item::Image(image) => &mut image.rect.origin,
         };
         origin.x += dx;
         origin.y += dy;
@@ -41,6 +43,94 @@ impl Item {
 pub struct Fill {
     pub rect: Rect,
     pub color: Color,
+}
+
+/// An image scaled to fill `rect`.
+#[derive(Debug, Clone)]
+pub struct Image {
+    pub rect: Rect,
+    pub data: Arc<ImageData>,
+}
+
+/// A raster format that can be embedded in a PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+/// An encoded image file, with the format and pixel size read from its
+/// header. The pixels themselves are only decoded when the PDF is written.
+#[derive(Clone)]
+pub struct ImageData {
+    pub bytes: Arc<Vec<u8>>,
+    pub format: ImageFormat,
+    /// Size in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Where the image came from, shortened for messages.
+    pub source: String,
+}
+
+impl ImageData {
+    /// Reads the format and size of an image file. `source` is its URL.
+    pub fn new(bytes: Vec<u8>, source: &str) -> Result<Self, String> {
+        let format = match imagesize::image_type(&bytes) {
+            Ok(imagesize::ImageType::Png) => ImageFormat::Png,
+            Ok(imagesize::ImageType::Jpeg) => ImageFormat::Jpeg,
+            Ok(imagesize::ImageType::Gif) => ImageFormat::Gif,
+            Ok(imagesize::ImageType::Webp) => ImageFormat::Webp,
+            _ if looks_like_svg(&bytes) => return Err("SVG images are not supported yet".into()),
+            _ => {
+                return Err("not an image format presswork supports (PNG, JPEG, GIF, WebP)".into());
+            }
+        };
+        let size = imagesize::blob_size(&bytes).map_err(|e| format!("unreadable image: {e}"))?;
+        let (Ok(width), Ok(height)) = (u32::try_from(size.width), u32::try_from(size.height))
+        else {
+            return Err("image is too large".into());
+        };
+        if width == 0 || height == 0 {
+            return Err("image is empty".into());
+        }
+        Ok(Self {
+            bytes: Arc::new(bytes),
+            format,
+            width,
+            height,
+            source: presswork_dom::resource::display_url(source).into_owned(),
+        })
+    }
+
+    /// The size in points at which the image displays by default: one
+    /// pixel per CSS px, as browsers do.
+    pub fn natural_size(&self) -> Size {
+        const PT_PER_PX: f32 = 0.75;
+        Size {
+            width: self.width as f32 * PT_PER_PX,
+            height: self.height as f32 * PT_PER_PX,
+        }
+    }
+}
+
+/// Whether `bytes` start like an SVG document.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    head.contains("<svg")
+}
+
+impl fmt::Debug for ImageData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImageData")
+            .field("format", &self.format)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.bytes.len())
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// Shaped glyphs in a single font, size and color, drawn left to right

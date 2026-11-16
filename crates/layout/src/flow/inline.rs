@@ -4,11 +4,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use parley::{
-    Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, Language, Layout,
-    LineHeight as ParleyLineHeight, PositionedLayoutItem, StyleProperty, TextWrapMode,
+    Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, InlineBox, InlineBoxKind,
+    Language, Layout, LineHeight as ParleyLineHeight, PositionedLayoutItem, StyleProperty,
+    TextWrapMode, VerticalAlign as ParleyVerticalAlign,
 };
 use presswork_dom::{Document, NodeId};
-use presswork_style::{Color, ComputedStyle, LineHeight, ListStyleType, TextAlign, WhiteSpace};
+use presswork_style::{
+    Color, ComputedStyle, LineHeight, ListStyleType, TextAlign, VerticalAlign, WhiteSpace,
+};
 
 use super::{Context, Flow, GenericFonts};
 use crate::fragment::{Glyph, Item, TextRun};
@@ -25,15 +28,56 @@ impl Default for Ink {
 }
 
 /// Inline content gathered for one paragraph: the text after white-space
-/// processing, and the style of each stretch of it.
+/// processing, the style of each stretch of it, and the boxes (images)
+/// that flow with it.
 #[derive(Default)]
 pub(super) struct Inline {
     text: String,
     spans: Vec<(Range<usize>, ComputedStyle)>,
+    boxes: Vec<InlineObject>,
+}
+
+/// An atomic box laid out inline, like a character: an image.
+pub(super) struct InlineObject {
+    /// Byte offset of the U+FFFC character that stands for the box in the
+    /// paragraph's text. Set by [`Inline::push_box`].
+    index: usize,
+    /// Margin box size.
+    pub width: f32,
+    pub height: f32,
+    /// The narrowest the box can be: zero for an image sized as a
+    /// percentage of its container, which shrinks to fit; otherwise
+    /// `width`. Only used when measuring.
+    pub min_width: f32,
+    pub vertical_align: VerticalAlign,
+    /// Content relative to the top-left of the margin box.
+    pub items: Vec<Item>,
 }
 
 /// Tab stops in preformatted text, in characters.
 const TAB_SIZE: usize = 8;
+
+/// Stands for an inline box in the text given to parley.
+const OBJECT_REPLACEMENT: char = '\u{FFFC}';
+
+impl InlineObject {
+    pub fn new(
+        width: f32,
+        height: f32,
+        min_width: f32,
+        vertical_align: VerticalAlign,
+        items: Vec<Item>,
+    ) -> Self {
+        Self {
+            index: 0,
+            width,
+            height,
+            min_width,
+            vertical_align,
+            items,
+        }
+    }
+}
 
 impl Inline {
     /// Appends text, applying the `white-space` rules of `style`.
@@ -75,6 +119,15 @@ impl Inline {
         self.push_newline();
         let end = self.text.len();
         self.spans.push((end - 1..end, style.clone()));
+    }
+
+    /// Appends an atomic inline box. Spaces around it are kept.
+    pub fn push_box(&mut self, mut object: InlineObject, style: &ComputedStyle) {
+        object.index = self.text.len();
+        self.text.push(OBJECT_REPLACEMENT);
+        self.spans
+            .push((object.index..self.text.len(), style.clone()));
+        self.boxes.push(object);
     }
 
     fn push_newline(&mut self) {
@@ -141,6 +194,7 @@ impl Context<'_> {
         text: &str,
         style: &ComputedStyle,
         spans: &[(Range<usize>, ComputedStyle)],
+        boxes: &[InlineObject],
     ) -> Layout<Ink> {
         let mut builder = self.texts.ranged_builder(self.fonts, text, 1.0, false);
         for property in text_properties(self.generics, style) {
@@ -150,6 +204,17 @@ impl Context<'_> {
             for property in text_properties(self.generics, span) {
                 builder.push(property, range.clone());
             }
+        }
+        for (id, object) in boxes.iter().enumerate() {
+            builder.push_inline_box(InlineBox {
+                id: id as u64,
+                kind: InlineBoxKind::InFlow,
+                index: object.index,
+                width: object.width,
+                height: object.height,
+                baseline: None,
+                vertical_align: vertical_align(object.vertical_align),
+            });
         }
         builder.build(text)
     }
@@ -162,11 +227,20 @@ impl Flow<'_, '_> {
             return;
         }
         let text: Arc<str> = inline.text.into();
-        let mut layout = self.cx.shape(&text, style, &inline.spans);
+        let boxes = inline.boxes;
+        let mut layout = self.cx.shape(&text, style, &inline.spans, &boxes);
 
         if self.is_measuring() {
-            let widths = layout.calculate_content_widths();
-            self.record_extent(widths.min, widths.max);
+            let max = layout.calculate_content_widths().max;
+            // Boxes that can shrink count at their narrowest for the
+            // minimum.
+            for (index, object) in boxes.iter().enumerate() {
+                if object.min_width < object.width {
+                    layout.edit_inline_box(index, |b| b.width = object.min_width);
+                }
+            }
+            let min = layout.calculate_content_widths().min;
+            self.record_extent(min, max);
             return;
         }
 
@@ -187,12 +261,24 @@ impl Flow<'_, '_> {
             let mut items = Vec::new();
             let mut cursor = ClusterCursor::default();
             for item in line.items() {
-                if let PositionedLayoutItem::GlyphRun(run) = item {
-                    let origin = Point {
-                        x: x + run.offset(),
-                        y: run.baseline() - top,
-                    };
-                    items.push(Item::Text(text_run(&run, origin, &text, &mut cursor)));
+                match item {
+                    PositionedLayoutItem::GlyphRun(run) => {
+                        let origin = Point {
+                            x: x + run.offset(),
+                            y: run.baseline() - top,
+                        };
+                        items.push(Item::Text(text_run(&run, origin, &text, &mut cursor)));
+                    }
+                    PositionedLayoutItem::InlineBox(placed) => {
+                        let object = &boxes[placed.id as usize];
+                        items.extend(
+                            object
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(|item| item.translate(x + placed.x, placed.y - top)),
+                        );
+                    }
                 }
             }
             if index == 0
@@ -223,7 +309,7 @@ impl Flow<'_, '_> {
             ..style.clone()
         };
         let text: Arc<str> = marker.into();
-        let mut layout = self.cx.shape(&text, &style, &[]);
+        let mut layout = self.cx.shape(&text, &style, &[], &[]);
         layout.break_all_lines(None);
         let gap = style.font_size * 0.4;
         let start = x - layout.width() - gap;
@@ -242,6 +328,20 @@ impl Flow<'_, '_> {
             }
         }
         items
+    }
+}
+
+/// parley's equivalent of a `vertical-align` value.
+fn vertical_align(value: VerticalAlign) -> ParleyVerticalAlign {
+    match value {
+        VerticalAlign::Baseline => ParleyVerticalAlign::BASELINE,
+        VerticalAlign::Sub => ParleyVerticalAlign::SUB,
+        VerticalAlign::Super => ParleyVerticalAlign::SUPER,
+        VerticalAlign::TextTop => ParleyVerticalAlign::TEXT_TOP,
+        VerticalAlign::TextBottom => ParleyVerticalAlign::TEXT_BOTTOM,
+        VerticalAlign::Middle => ParleyVerticalAlign::MIDDLE,
+        VerticalAlign::Top => ParleyVerticalAlign::TOP,
+        VerticalAlign::Bottom => ParleyVerticalAlign::BOTTOM,
     }
 }
 

@@ -4,9 +4,12 @@
 //! by [`NodeId`]. This keeps the tree cheap to traverse and avoids
 //! reference-counted pointers throughout the pipeline.
 //!
-//! [`parse_html`] builds a document from HTML using `html5ever`.
+//! [`parse_html`] builds a document from HTML using `html5ever`. The
+//! [`resource`] module defines how the resources a document refers to
+//! (images) are loaded.
 
 mod parse;
+pub mod resource;
 
 use std::collections::HashMap;
 use std::fmt;

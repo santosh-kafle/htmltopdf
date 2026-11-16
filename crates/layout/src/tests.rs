@@ -6,9 +6,15 @@ use presswork_style::Stylist;
 use super::*;
 
 fn layout_with(html: &str, options: &LayoutOptions) -> Vec<Page> {
+    let output = output_with(html, options);
+    assert_eq!(output.failures, [], "every resource loads");
+    output.pages
+}
+
+fn output_with(html: &str, options: &LayoutOptions) -> Output {
     let doc = parse_html(html.as_bytes());
     let styles = Stylist::for_document(&doc);
-    Engine::new().layout(&doc, &styles, options)
+    Engine::new().layout(&doc, &styles, options, &DataUrls)
 }
 
 fn layout(html: &str) -> Vec<Page> {
@@ -20,7 +26,7 @@ fn runs(page: &Page) -> Vec<&TextRun> {
         .iter()
         .filter_map(|item| match item {
             Item::Text(run) => Some(run),
-            Item::Fill(_) => None,
+            Item::Fill(_) | Item::Image(_) => None,
         })
         .collect()
 }
@@ -30,7 +36,7 @@ fn fills(page: &Page) -> Vec<Fill> {
         .iter()
         .filter_map(|item| match item {
             Item::Fill(fill) => Some(*fill),
-            Item::Text(_) => None,
+            Item::Text(_) | Item::Image(_) => None,
         })
         .collect()
 }
@@ -480,4 +486,141 @@ fn styled_invoice_paginates_with_repeated_headers() {
             );
         }
     }
+}
+
+/// A 2x1 PNG (one red pixel, one blue): 1.5pt by 0.75pt at its natural
+/// size.
+const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP4z8DAwPAfAAcAAf9+CLHQAAAAAElFTkSuQmCC";
+
+fn images(page: &Page) -> Vec<Rect> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Image(image) => Some(image.rect),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn inline_image_sits_on_the_baseline_after_the_text() {
+    let pages = layout(&format!("<p>Logo <img src='{PNG}' width=200> text</p>"));
+    let [image] = images(&pages[0])[..] else {
+        panic!("one image");
+    };
+    // 200px wide, half as tall: the 2:1 shape is kept.
+    assert_eq!((image.size.width, image.size.height), (150.0, 75.0));
+    let logo = run_with(&pages[0], "Logo");
+    // Right after "Logo " (the run includes the space).
+    assert!(approx(image.origin.x, right_edge(logo)));
+    let bottom = image.origin.y + image.size.height;
+    assert!(
+        approx(bottom, logo.origin.y),
+        "{bottom} vs {}",
+        logo.origin.y
+    );
+    // The line grew to fit it: the text shares the image's line.
+    let text = run_with(&pages[0], "text");
+    assert_eq!(text.origin.y, logo.origin.y);
+    assert!(approx(text.origin.x, image.origin.x + image.size.width));
+}
+
+#[test]
+fn vertical_align_middle_centers_an_image_on_the_text() {
+    let pages = layout(&format!(
+        "<p>x <img src='{PNG}' width=80 style='vertical-align: middle'></p>"
+    ));
+    let image = images(&pages[0])[0];
+    let baseline = run_with(&pages[0], "x").origin.y;
+    // Centered half an x-height above the baseline: a few points for
+    // 12pt text.
+    let center = image.origin.y + image.size.height / 2.0;
+    assert!(
+        center < baseline && center > baseline - 5.0,
+        "{center} vs {baseline}"
+    );
+}
+
+#[test]
+fn block_image_is_centered_by_auto_margins() {
+    let pages = layout(&format!(
+        "<img src='{PNG}' style='display: block; width: 100pt; margin: 0 auto'>"
+    ));
+    let [image] = images(&pages[0])[..] else {
+        panic!("one image");
+    };
+    // Inside the body's default 8px (6pt) margin.
+    let content = PageSize::A4.size(Orientation::Portrait).width - 2.0 * M - 12.0;
+    assert!(approx(image.origin.x, M + 6.0 + (content - 100.0) / 2.0));
+    assert_eq!((image.origin.y, image.size.height), (M + 6.0, 50.0));
+}
+
+#[test]
+fn max_width_fits_a_large_image_into_its_table_cell() {
+    let pages = layout(&format!(
+        "<table><tr><td><img src='{PNG}' style='width: 4000px; max-width: 100%'></td>\
+         <td>Invoice number 42</td></tr></table>"
+    ));
+    let [image] = images(&pages[0])[..] else {
+        panic!("one image");
+    };
+    let page_width = pages[0].size.width;
+    assert!(image.origin.x + image.size.width <= page_width - M + 0.01);
+    assert!(image.size.width > 100.0, "uses the room there is");
+    assert!(approx(image.size.height, image.size.width / 2.0));
+    let text = run_with(&pages[0], "Invoice");
+    assert!(right_edge(text) <= page_width - M + 0.01);
+}
+
+#[test]
+fn missing_image_shows_its_alt_text_and_is_reported_once() {
+    let output = output_with(
+        "<p><img src='logo.png' alt='ACME Ltd'> and again <img src=' logo.png '></p>",
+        &LayoutOptions::default(),
+    );
+    assert_eq!(words(&output.pages[0]), ["ACME Ltd and again"]);
+    assert!(images(&output.pages[0]).is_empty());
+    assert_eq!(output.failures.len(), 1);
+    assert_eq!(output.failures[0].url, "logo.png");
+    assert!(matches!(output.failures[0].error, LoadError::Blocked(_)));
+}
+
+#[test]
+fn missing_image_with_a_size_keeps_its_box() {
+    let output = output_with(
+        "<p><img src='logo.png' width=100 height=40 style='border: 2px solid red'>x</p>",
+        &LayoutOptions::default(),
+    );
+    let page = &output.pages[0];
+    let border: Vec<Fill> = fills(page).into_iter().filter(|f| f.color == RED).collect();
+    assert_eq!(border.len(), 4);
+    let left = border
+        .iter()
+        .map(|f| f.rect.origin.x)
+        .fold(f32::MAX, f32::min);
+    let x = run_with(page, "x");
+    // 100px of content plus 2px of border each side.
+    assert!(approx(x.origin.x - left, 75.0 + 3.0));
+}
+
+#[test]
+fn unsupported_image_formats_are_reported() {
+    let output = output_with(
+        "<img src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E'>",
+        &LayoutOptions::default(),
+    );
+    assert_eq!(output.failures.len(), 1);
+    assert!(
+        output.failures[0].error.to_string().contains("SVG"),
+        "{:?}",
+        output.failures
+    );
+}
+
+#[test]
+fn an_image_that_does_not_fit_moves_to_the_next_page() {
+    let image = format!("<img src='{PNG}' style='display: block; height: 500pt'>");
+    let pages = layout(&format!("{image}{image}"));
+    assert_eq!(pages.len(), 2);
+    assert_eq!(images(&pages[1])[0].origin.y, M);
 }

@@ -149,11 +149,17 @@ keyword_enum! {
 }
 
 keyword_enum! {
-    /// `vertical-align`, as it applies to table cells.
+    /// `vertical-align`. Lengths and percentages are not supported. Table
+    /// cells treat the values that are not `top`, `middle` or `bottom` as
+    /// `baseline`.
     VerticalAlign {
-        Baseline = "baseline" | "sub" | "super" | "text-top" | "text-bottom",
-        Top = "top",
+        Baseline = "baseline",
+        Sub = "sub",
+        Super = "super",
+        TextTop = "text-top",
+        TextBottom = "text-bottom",
         Middle = "middle",
+        Top = "top",
         Bottom = "bottom",
     }
 }
@@ -261,6 +267,9 @@ pub enum LonghandId {
     BorderStyle(Side),
     BorderColor(Side),
     Width,
+    Height,
+    MaxWidth,
+    MaxHeight,
     BoxSizing,
     VerticalAlign,
     BorderCollapse,
@@ -278,8 +287,8 @@ impl LonghandId {
             Color | FontFamily | FontSize | FontWeight | FontStyle | LineHeight | TextAlign
             | WhiteSpace | BorderCollapse | BorderSpacing | ListStyleType => true,
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
-            | BorderStyle(_) | BorderColor(_) | Width | BoxSizing | VerticalAlign | BreakBefore
-            | BreakAfter => false,
+            | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
+            | BoxSizing | VerticalAlign | BreakBefore | BreakAfter => false,
         }
     }
 
@@ -298,6 +307,9 @@ impl LonghandId {
             TextAlign,
             WhiteSpace,
             Width,
+            Height,
+            MaxWidth,
+            MaxHeight,
             BoxSizing,
             VerticalAlign,
             BorderCollapse,
@@ -340,6 +352,11 @@ pub enum PropertyDeclaration {
     BorderStyle(Side, BorderStyle),
     BorderColor(Side, ColorValue),
     Width(Dim),
+    Height(Dim),
+    /// `none` is [`Dim::Auto`].
+    MaxWidth(Dim),
+    /// `none` is [`Dim::Auto`].
+    MaxHeight(Dim),
     BoxSizing(BoxSizing),
     VerticalAlign(VerticalAlign),
     BorderCollapse(BorderCollapse),
@@ -372,6 +389,9 @@ impl PropertyDeclaration {
             D::BorderStyle(side, _) => LonghandId::BorderStyle(*side),
             D::BorderColor(side, _) => LonghandId::BorderColor(*side),
             D::Width(_) => LonghandId::Width,
+            D::Height(_) => LonghandId::Height,
+            D::MaxWidth(_) => LonghandId::MaxWidth,
+            D::MaxHeight(_) => LonghandId::MaxHeight,
             D::BoxSizing(_) => LonghandId::BoxSizing,
             D::VerticalAlign(_) => LonghandId::VerticalAlign,
             D::BorderCollapse(_) => LonghandId::BorderCollapse,
@@ -426,6 +446,9 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "text-align" => one(L::TextAlign),
         "white-space" => one(L::WhiteSpace),
         "width" => one(L::Width),
+        "height" => one(L::Height),
+        "max-width" => one(L::MaxWidth),
+        "max-height" => one(L::MaxHeight),
         "box-sizing" => one(L::BoxSizing),
         "vertical-align" => one(L::VerticalAlign),
         "border-collapse" => one(L::BorderCollapse),
@@ -538,6 +561,9 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::BorderStyle(side) => D::BorderStyle(side, BorderStyle::parse(input)?),
         L::BorderColor(side) => D::BorderColor(side, ColorValue::parse(input)?),
         L::Width => D::Width(Dim::parse(input, true, false)?),
+        L::Height => D::Height(Dim::parse(input, true, false)?),
+        L::MaxWidth => D::MaxWidth(parse_max_size(input)?),
+        L::MaxHeight => D::MaxHeight(parse_max_size(input)?),
         L::BoxSizing => D::BoxSizing(BoxSizing::parse(input)?),
         L::VerticalAlign => D::VerticalAlign(VerticalAlign::parse(input)?),
         L::BorderCollapse => D::BorderCollapse(BorderCollapse::parse(input)?),
@@ -552,6 +578,14 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::BreakBefore => D::BreakBefore(Break::parse(input)?),
         L::BreakAfter => D::BreakAfter(Break::parse(input)?),
     })
+}
+
+/// `max-width` / `max-height`: a length or percentage, or `none`.
+fn parse_max_size(input: &mut Parser<'_>) -> Parsed<Dim> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(Dim::Auto);
+    }
+    Dim::parse(input, false, false)
 }
 
 /// Parses one to four values and assigns them to sides the way `margin`
@@ -950,10 +984,26 @@ mod tests {
     }
 
     #[test]
+    fn sizes_and_vertical_align() {
+        assert_eq!(parse("max-width", "none"), Ok(vec![D::MaxWidth(Dim::Auto)]));
+        assert_eq!(
+            parse("max-width", "100%"),
+            Ok(vec![D::MaxWidth(Dim::Percent(1.0))])
+        );
+        assert!(parse("max-height", "auto").is_err());
+        assert_eq!(parse("height", "auto"), Ok(vec![D::Height(Dim::Auto)]));
+        assert!(parse("height", "-1px").is_err());
+        assert_eq!(
+            parse("vertical-align", "text-top"),
+            Ok(vec![D::VerticalAlign(VerticalAlign::TextTop)])
+        );
+    }
+
+    #[test]
     fn every_longhand_is_listed_once() {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 18 + 4 * 5);
+        assert_eq!(all.len(), 21 + 4 * 5);
     }
 }

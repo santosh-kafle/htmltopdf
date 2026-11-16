@@ -54,11 +54,15 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("version", Some('V'), Version),
     ("extended-help", Some('H'), Help),
     ("log-level", None, LogLevel),
-    // Already the default behavior: no JavaScript, no plugins, no local
-    // file access, print media.
+    ("enable-local-file-access", None, Pass(0)),
+    ("disable-local-file-access", None, Pass(0)),
+    ("allow", None, Pass(1)),
+    ("images", None, Pass(0)),
+    ("no-images", None, Pass(0)),
+    ("load-media-error-handling", None, Pass(1)),
+    // Already the default behavior: no JavaScript, no plugins, print media.
     ("disable-javascript", Some('n'), Accept(0)),
     ("disable-plugins", None, Accept(0)),
-    ("disable-local-file-access", None, Accept(0)),
     ("print-media-type", None, Accept(0)),
     ("no-debug-javascript", None, Accept(0)),
     ("stop-slow-scripts", None, Accept(0)),
@@ -89,7 +93,6 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("no-outline", None, Ignore(0)),
     ("outline-depth", None, Ignore(1)),
     // Page options.
-    ("allow", None, Lossy(1)),
     ("background", None, Ignore(0)),
     ("no-background", None, Lossy(0)),
     ("bypass-proxy-for", None, Ignore(1)),
@@ -107,16 +110,12 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("enable-external-links", None, Ignore(0)),
     ("disable-forms", None, Ignore(0)),
     ("enable-forms", None, Ignore(0)),
-    ("images", None, Ignore(0)),
-    ("no-images", None, Lossy(0)),
     ("disable-internal-links", None, Ignore(0)),
     ("enable-internal-links", None, Ignore(0)),
     ("enable-javascript", None, Lossy(0)),
     ("javascript-delay", None, Lossy(1)),
     ("keep-relative-links", None, Ignore(0)),
     ("load-error-handling", None, Ignore(1)),
-    ("load-media-error-handling", None, Ignore(1)),
-    ("enable-local-file-access", None, Lossy(0)),
     ("minimum-font-size", None, Lossy(1)),
     ("exclude-from-outline", None, Ignore(0)),
     ("include-in-outline", None, Ignore(0)),
@@ -366,7 +365,7 @@ mod tests {
     fn accepts_options_that_match_default_behavior_silently() {
         let r = run(&[
             "-n",
-            "--disable-local-file-access",
+            "--print-media-type",
             "--disable-smart-shrinking",
             "a",
             "b",

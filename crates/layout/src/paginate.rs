@@ -148,7 +148,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 Item::Fill(fill) => Some((fill.rect.origin.y, fill.rect.size.height, fill.color)),
-                Item::Text(_) => None,
+                Item::Text(_) | Item::Image(_) => None,
             })
             .collect()
     }

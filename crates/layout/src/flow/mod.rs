@@ -19,20 +19,26 @@
 //! - [`boxes`]: resolving the box model
 //! - [`inline`]: gathering inline content, shaping and line breaking
 //! - [`table`]: table layout
+//! - [`replaced`]: sizing and placing images
 //! - [`fonts`]: mapping CSS font families to fonts
 
 mod boxes;
 mod fonts;
 mod inline;
+mod replaced;
 mod table;
 
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use parley::{FontContext, LayoutContext};
+use presswork_dom::resource::{LoadError, Loader, display_url};
 use presswork_dom::{Document, NodeId, NodeKind};
 use presswork_style::{Break, Color, ComputedStyle, Dimension, Display, Side, Stylist};
 
-use crate::fragment::{Fill, Item};
+use crate::LoadFailure;
+use crate::fragment::{Fill, ImageData, Item};
 use crate::geometry::Rect;
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
@@ -200,6 +206,41 @@ pub(crate) struct Context<'a> {
     pub texts: &'a mut LayoutContext<Ink>,
     pub doc: &'a Document,
     pub styles: &'a Stylist,
+    pub loader: &'a dyn Loader,
+    /// Images by URL, `None` for those that failed, so each loads once.
+    pub images: HashMap<String, Option<Arc<ImageData>>>,
+    pub failures: Vec<LoadFailure>,
+}
+
+impl Context<'_> {
+    /// The image at `url`, loaded on first use. Failures are recorded in
+    /// [`Context::failures`].
+    fn image(&mut self, url: &str) -> Option<Arc<ImageData>> {
+        let url = url.trim();
+        if url.is_empty() {
+            // Browsers do not load an empty `src` either.
+            return None;
+        }
+        if let Some(image) = self.images.get(url) {
+            return image.clone();
+        }
+        let image = self
+            .loader
+            .load(url)
+            .and_then(|bytes| ImageData::new(bytes, url).map_err(LoadError::Failed));
+        let image = match image {
+            Ok(image) => Some(Arc::new(image)),
+            Err(error) => {
+                self.failures.push(LoadFailure {
+                    url: display_url(url).into_owned(),
+                    error,
+                });
+                None
+            }
+        };
+        self.images.insert(url.to_owned(), image.clone());
+        image
+    }
 }
 
 /// What a [`Flow`] produces.
@@ -314,6 +355,9 @@ impl<'c, 'a> Flow<'c, 'a> {
     /// Lays out the block-level element `id` in a containing block whose
     /// content box starts at `x` and is `width` wide.
     pub fn block(&mut self, id: NodeId, style: &ComputedStyle, x: f32, width: f32) {
+        if replaced::is_image(self.cx.doc, id) {
+            return self.block_image(id, style, x, width);
+        }
         if style.display == Display::Table {
             return self.table(id, style, x, width);
         }
@@ -422,6 +466,9 @@ impl<'c, 'a> Flow<'c, 'a> {
                     match child_style.display {
                         Display::None => {}
                         Display::Inline if element.name == "br" => inline.push_break(&child_style),
+                        Display::Inline if replaced::is_image(doc, child) => {
+                            self.inline_image(child, &child_style, width, inline);
+                        }
                         Display::Inline => self.children(child, &child_style, x, width, inline),
                         _ => {
                             self.paragraph(std::mem::take(inline), style, x, width);

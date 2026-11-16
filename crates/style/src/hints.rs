@@ -63,10 +63,32 @@ pub(crate) fn presentational_hints(
         hints.push(D::VerticalAlign(valign));
     }
 
-    if matches!(name, "table" | "td" | "th" | "hr")
+    if matches!(name, "table" | "td" | "th" | "hr" | "img")
         && let Some(width) = element.attr("width").and_then(parse_dimension)
     {
         hints.push(D::Width(width));
+    }
+    if name == "img" {
+        if let Some(height) = element.attr("height").and_then(parse_dimension) {
+            hints.push(D::Height(height));
+        }
+        // `border="0"` is common in old templates and means none.
+        if let Some(width) = element.attr("border").and_then(parse_pixels)
+            && width > 0.0
+        {
+            push_border(&mut hints, Length::px(width), ColorValue::CurrentColor);
+        }
+        // `left` and `right` float the image, which is not supported.
+        let align = element.attr("align").map(str::to_ascii_lowercase);
+        let valign = match align.as_deref() {
+            Some("top") => Some(VerticalAlign::Top),
+            Some("texttop") => Some(VerticalAlign::TextTop),
+            Some("middle" | "absmiddle" | "abscenter") => Some(VerticalAlign::Middle),
+            Some("bottom" | "baseline") => Some(VerticalAlign::Baseline),
+            Some("absbottom") => Some(VerticalAlign::Bottom),
+            _ => None,
+        };
+        hints.extend(valign.map(D::VerticalAlign));
     }
 
     if matches!(
@@ -81,7 +103,7 @@ pub(crate) fn presentational_hints(
         if let Some(width) = element.attr("border").map(parse_border_attribute)
             && width > 0.0
         {
-            push_border(&mut hints, Length::px(width));
+            push_border(&mut hints, Length::px(width), GRAY);
         }
         if let Some(spacing) = element.attr("cellspacing").and_then(parse_pixels) {
             hints.push(D::BorderSpacing(Length::px(spacing)));
@@ -96,7 +118,7 @@ pub(crate) fn presentational_hints(
                 .unwrap_or(0.0)
                 > 0.0
             {
-                push_border(&mut hints, Length::px(1.0));
+                push_border(&mut hints, Length::px(1.0), GRAY);
             }
             if let Some(padding) = table.attr("cellpadding").and_then(parse_pixels) {
                 let padding = Dim::Length(Length::px(padding));
@@ -134,15 +156,17 @@ pub(crate) fn presentational_hints(
     hints
 }
 
-/// A solid gray border on all sides, as `<table border>` draws.
-fn push_border(hints: &mut Vec<PropertyDeclaration>, width: Length) {
+/// The border color `<table border>` draws.
+const GRAY: ColorValue = ColorValue::Color(Color::rgb(128, 128, 128));
+
+/// A solid border on all sides.
+fn push_border(hints: &mut Vec<PropertyDeclaration>, width: Length, color: ColorValue) {
     use PropertyDeclaration as D;
-    let gray = ColorValue::Color(Color::rgb(128, 128, 128));
     for side in Side::ALL {
         hints.extend([
             D::BorderWidth(side, width),
             D::BorderStyle(side, BorderStyle::Solid),
-            D::BorderColor(side, gray),
+            D::BorderColor(side, color),
         ]);
     }
 }
@@ -269,6 +293,27 @@ mod tests {
         assert_eq!(table[0], D::BorderWidth(Side::Top, Length::Pt(1.5)));
         assert_eq!(table[12], D::BorderSpacing(Length::Pt(0.0)));
         assert_eq!(hints("<table border=0><tr><td>", "td"), []);
+    }
+
+    #[test]
+    fn image_attributes() {
+        use crate::values::Dim;
+        let img = hints(
+            "<img width=120 height='50%' border=0 align=absmiddle>",
+            "img",
+        );
+        assert_eq!(
+            img,
+            [
+                D::Width(Dim::Length(Length::px(120.0))),
+                D::Height(Dim::Percent(0.5)),
+                D::VerticalAlign(VerticalAlign::Middle),
+            ]
+        );
+        // A non-zero border takes the text color.
+        let img = hints("<img border=2>", "img");
+        assert!(img.contains(&D::BorderColor(Side::Top, ColorValue::CurrentColor)));
+        assert!(img.contains(&D::BorderWidth(Side::Left, Length::px(2.0))));
     }
 
     #[test]

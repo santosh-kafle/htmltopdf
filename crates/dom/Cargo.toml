@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 html5ever.workspace = true
+data-url.workspace = true
 
 [lints]
 workspace = true

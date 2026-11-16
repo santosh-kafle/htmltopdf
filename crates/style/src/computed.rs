@@ -63,6 +63,14 @@ pub struct ComputedStyle {
     pub padding: Sides<Dimension>,
     pub border: Sides<BorderSide>,
     pub width: Dimension,
+    /// Only images use `height` so far; blocks are as tall as their
+    /// content. A percentage behaves as `auto`, as the page has no
+    /// definite height to resolve it against.
+    pub height: Dimension,
+    /// `Auto` means `none`.
+    pub max_width: Dimension,
+    /// `Auto` means `none`. Only images use it so far.
+    pub max_height: Dimension,
     pub box_sizing: BoxSizing,
     pub vertical_align: VerticalAlign,
     pub border_collapse: BorderCollapse,
@@ -96,6 +104,9 @@ impl ComputedStyle {
             padding: Sides::uniform(Dimension::ZERO),
             border: Sides::uniform(BorderSide::default()),
             width: Dimension::Auto,
+            height: Dimension::Auto,
+            max_width: Dimension::Auto,
+            max_height: Dimension::Auto,
             box_sizing: BoxSizing::ContentBox,
             vertical_align: VerticalAlign::Baseline,
             border_collapse: BorderCollapse::Separate,
@@ -140,6 +151,9 @@ impl ComputedStyle {
             L::BorderStyle(side) => self.border_mut(side).style = other.border.get(side).style,
             L::BorderColor(side) => self.border_mut(side).color = other.border.get(side).color,
             L::Width => self.width = other.width,
+            L::Height => self.height = other.height,
+            L::MaxWidth => self.max_width = other.max_width,
+            L::MaxHeight => self.max_height = other.max_height,
             L::BoxSizing => self.box_sizing = other.box_sizing,
             L::VerticalAlign => self.vertical_align = other.vertical_align,
             L::BorderCollapse => self.border_collapse = other.border_collapse,
@@ -213,6 +227,9 @@ impl ComputedStyle {
             D::BorderStyle(side, v) => self.border_mut(*side).style = *v,
             D::BorderColor(side, v) => self.border_mut(*side).color = *v,
             D::Width(v) => self.width = v.compute(font_size, root),
+            D::Height(v) => self.height = v.compute(font_size, root),
+            D::MaxWidth(v) => self.max_width = v.compute(font_size, root),
+            D::MaxHeight(v) => self.max_height = v.compute(font_size, root),
             D::BoxSizing(v) => self.box_sizing = *v,
             D::VerticalAlign(v) => self.vertical_align = *v,
             D::BorderCollapse(v) => self.border_collapse = *v,

@@ -1,4 +1,5 @@
 mod compat;
+mod loader;
 mod page;
 
 use std::ffi::OsString;
@@ -8,10 +9,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
-use presswork_layout::Engine;
+use presswork_layout::{Engine, LoadError, LoadFailure};
 use presswork_paint::PdfOptions;
 use presswork_style::Stylist;
+use url::Url;
 
+use loader::{FileLoader, ResourceArgs};
 use page::PageArgs;
 
 /// Convert HTML documents to PDF.
@@ -29,17 +32,20 @@ struct Cli {
     #[command(flatten)]
     page: PageArgs,
 
+    #[command(flatten)]
+    resources: ResourceArgs,
+
     /// Document title written to the PDF metadata.
     #[arg(long)]
     title: Option<String>,
 
-    /// Do not print warnings, except for ignored options that change the
-    /// output.
+    /// Do not print warnings, except about ignored options and network
+    /// resources, which change the output.
     #[arg(short, long)]
     quiet: bool,
 
-    /// Fail instead of warning when an unsupported option would change the
-    /// output (headers, footers, zoom, ...).
+    /// Fail instead of warning when an unsupported option (headers,
+    /// footers, zoom, ...) or a network resource would change the output.
     #[arg(
         long,
         env = "PRESSWORK_STRICT",
@@ -78,6 +84,22 @@ enum Sink {
 }
 
 impl Source {
+    /// The URL that relative URLs in the document resolve against.
+    fn base_url(&self) -> Result<Url> {
+        let url = match self {
+            Source::Stdin => {
+                let cwd =
+                    std::env::current_dir().context("failed to read the current directory")?;
+                Url::from_directory_path(cwd)
+            }
+            Source::File(path) => Url::from_file_path(
+                std::path::absolute(path)
+                    .with_context(|| format!("failed to resolve {}", path.display()))?,
+            ),
+        };
+        url.map_err(|()| anyhow::anyhow!("cannot make a URL for the input's location"))
+    }
+
     fn read(&self) -> Result<Vec<u8>> {
         match self {
             Source::Stdin => {
@@ -170,7 +192,7 @@ impl Cli {
 }
 
 /// Runs the whole pipeline: parse, style, lay out, write the PDF.
-fn render(html: &[u8], cli: &Cli) -> Result<Vec<u8>> {
+fn render(html: &[u8], cli: &Cli, loader: &FileLoader) -> Result<Vec<u8>> {
     let doc = presswork_dom::parse_html(html);
     let styles = Stylist::for_document(&doc);
     let layout = cli.page.layout_options(styles.page());
@@ -182,13 +204,23 @@ fn render(html: &[u8], cli: &Cli) -> Result<Vec<u8>> {
              install fontconfig and at least one font package"
         );
     }
-    let pages = engine.layout(&doc, &styles, &layout);
-    let pdf = PdfOptions {
+    let output = engine.layout(&doc, &styles, &layout, loader);
+    let options = PdfOptions {
         // wkhtmltopdf uses the document's <title> unless --title is given.
         title: cli.title.clone().or_else(|| doc.title()),
         author: None,
     };
-    Ok(presswork_paint::render_pdf(&pages, &pdf)?)
+    let pdf = presswork_paint::render_pdf(&output.pages, &options)?;
+
+    let mut failures = output.failures;
+    failures.extend(pdf.broken_images.into_iter().map(|url| LoadFailure {
+        url,
+        error: LoadError::Failed("the image data is corrupt".to_owned()),
+    }));
+    for warning in cli.resources.report(&failures, cli.quiet, cli.strict)? {
+        eprintln!("{warning}");
+    }
+    Ok(pdf.bytes)
 }
 
 fn main() -> Result<()> {
@@ -204,7 +236,8 @@ fn main() -> Result<()> {
 
     let (source, sink) = cli.io()?;
     let html = source.read()?;
-    let pdf = render(&html, &cli)?;
+    let loader = cli.resources.loader(source.base_url()?);
+    let pdf = render(&html, &cli, &loader)?;
     sink.write(&pdf)
 }
 

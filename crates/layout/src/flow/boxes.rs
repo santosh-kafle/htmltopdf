@@ -1,6 +1,6 @@
 //! Box model: resolving margins, borders, padding and width.
 
-use presswork_style::{BoxSizing, ComputedStyle, Sides};
+use presswork_style::{BoxSizing, ComputedStyle, Dimension, Sides};
 
 /// The used horizontal geometry and vertical edge sizes of a block box,
 /// in points.
@@ -31,7 +31,14 @@ impl BoxGeometry {
 
         let margin_left = style.margin.left.resolve(cb);
         let margin_right = style.margin.right.resolve(cb);
-        let width = shrink_to_fit.or_else(|| Self::specified_content_width(style, cb, edges));
+        let mut width = shrink_to_fit.or_else(|| Self::specified_content_width(style, cb, edges));
+        if let Some(max) = Self::content_size(style.max_width, style, cb, edges) {
+            // An auto width fills what the margins leave.
+            let fill = cb - edges - margin_left.unwrap_or(0.0) - margin_right.unwrap_or(0.0);
+            if width.unwrap_or(fill) > max {
+                width = Some(max);
+            }
+        }
 
         let (content_width, left, right) = match width {
             None => {
@@ -67,10 +74,22 @@ impl BoxGeometry {
     /// The content width the `width` property asks for, if not `auto`.
     /// `edges` is the horizontal border plus padding.
     pub fn specified_content_width(style: &ComputedStyle, cb: f32, edges: f32) -> Option<f32> {
-        let width = style.width.resolve(cb)?;
+        Self::content_size(style.width, style, cb, edges)
+    }
+
+    /// A `width`-like property's value as a content size, if not `auto`:
+    /// percentages resolve against `basis`, and under `box-sizing:
+    /// border-box` the `edges` (border plus padding) are taken off.
+    pub fn content_size(
+        value: Dimension,
+        style: &ComputedStyle,
+        basis: f32,
+        edges: f32,
+    ) -> Option<f32> {
+        let size = value.resolve(basis)?;
         Some(match style.box_sizing {
-            BoxSizing::ContentBox => width,
-            BoxSizing::BorderBox => (width - edges).max(0.0),
+            BoxSizing::ContentBox => size,
+            BoxSizing::BorderBox => (size - edges).max(0.0),
         })
     }
 
@@ -158,6 +177,21 @@ mod tests {
         assert_eq!(BoxGeometry::resolve(&s, 200.0, None).content_width, 100.0);
         s.box_sizing = BoxSizing::BorderBox;
         assert_eq!(BoxGeometry::resolve(&s, 200.0, None).content_width, 80.0);
+    }
+
+    #[test]
+    fn max_width_caps_the_width() {
+        let mut s = style();
+        s.max_width = Dimension::Percent(0.5);
+        assert_eq!(BoxGeometry::resolve(&s, 300.0, None).content_width, 150.0);
+        // Centered by auto margins once capped.
+        s.margin.left = Dimension::Auto;
+        s.margin.right = Dimension::Auto;
+        let g = BoxGeometry::resolve(&s, 300.0, None);
+        assert_eq!((g.content_width, g.margin.left), (150.0, 75.0));
+        // A narrower width is left alone.
+        s.width = Dimension::Pt(100.0);
+        assert_eq!(BoxGeometry::resolve(&s, 300.0, None).content_width, 100.0);
     }
 
     #[test]

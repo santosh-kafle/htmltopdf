@@ -400,9 +400,10 @@ impl Flow<'_, '_> {
 
             let free = (height - cell.vertical_edges() - content_height).max(0.0);
             let shift = match cell.style.vertical_align {
-                VerticalAlign::Top | VerticalAlign::Baseline => 0.0,
                 VerticalAlign::Middle => free / 2.0,
                 VerticalAlign::Bottom => free,
+                // Baseline alignment across cells is not implemented.
+                _ => 0.0,
             };
             canvas.into_items(
                 cell_x + cell.border.left + cell.padding.left,

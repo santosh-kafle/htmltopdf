@@ -6,8 +6,8 @@ replacement for [wkhtmltopdf](https://wkhtmltopdf.org/), which is no longer
 maintained, and accepts the same command line.
 
 > **Status: early development.** presswork renders text documents styled
-> with a useful subset of CSS. Images, floats, positioning, flexbox and grid
-> are not supported yet.
+> and images with a useful subset of CSS. Floats, positioning, flexbox and
+> grid are not supported yet.
 
 ## What works today
 
@@ -21,13 +21,21 @@ maintained, and accepts the same command line.
   - text: `color`, `font-family`, `font-size`, `font-weight`, `font-style`,
     `font`, `line-height`, `text-align`, `white-space`
   - boxes: `display`, `margin`, `padding`, `border` (drawn solid), `width`,
-    `box-sizing`, `background-color`
+    `max-width`, `box-sizing`, `background-color`
+  - images: `width`, `height`, `max-width`, `max-height`, `vertical-align`
   - tables: `border-collapse`, `border-spacing`, `vertical-align`
   - lists: `list-style-type`
   - pages: `break-before`, `break-after` and the `page-break-*` aliases
 - **Legacy HTML attributes** that wkhtmltopdf-era templates rely on:
-  `align`, `valign`, `width`, `bgcolor`, `border`, `cellpadding`,
+  `align`, `valign`, `width`, `height`, `bgcolor`, `border`, `cellpadding`,
   `cellspacing`, `nowrap` and `<font>`.
+- **Images.** PNG, JPEG, GIF and WebP in `<img>`, inline or as blocks,
+  sized by their attributes and CSS and scaled to fit with `max-width`.
+  `data:` URLs always load. Local files load only with
+  `--enable-local-file-access` or from a directory given with `--allow`,
+  as in wkhtmltopdf 0.12.6, and relative paths resolve against the input
+  file (or the current directory for standard input). An image that fails
+  to load is reported and replaced by its `alt` text.
 - **Tables.** Columns are sized to their content, with `colspan`, cell
   borders and backgrounds, and collapsed borders. Rows are never split
   across pages, and `<thead>` rows repeat at the top of every page.
@@ -60,8 +68,12 @@ maintained, and accepts the same command line.
   Tabloid). `-O` / `--orientation`, `--page-width`, `--page-height`,
   `-T` / `-R` / `-B` / `-L` (`--margin-*`) and `--title` are supported.
   Options given on the command line win over the document's `@page` rule.
+- **Resource options.** `--enable-local-file-access`,
+  `--disable-local-file-access`, `--allow`, `--images`, `--no-images` and
+  `--load-media-error-handling` (`abort` stops without writing the PDF).
 
-Not yet: images, linked stylesheets (`<link>`), `@font-face`, floats and
+Not yet: SVG and CSS background images, linked stylesheets (`<link>`),
+`@font-face`, floats and
 positioning, flexbox and grid, generated content (`::before`), text
 decoration, `height`, row-spanning cells (they occupy their first row only),
 and the wkhtmltopdf header, footer and table-of-contents options.
@@ -78,9 +90,10 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 
 - **No JavaScript.** `--javascript-delay`, `--window-status` and
   `--run-script` have no effect. Render dynamic content on the server first.
-- **No network access.** Documents are not fetched from `http(s)://` URLs.
-  Local and network resources referenced by a document will only load when
-  explicitly allowed.
+- **No network access.** Documents and images are never fetched from
+  `http(s)://` URLs. An image that would need the network is reported even
+  under `--quiet`, since wkhtmltopdf would have loaded it, and `--strict`
+  makes it an error. Embed such images as `data:` URLs or local files.
 - **Standards-based layout.** Output follows the CSS specifications, not
   QtWebKit, so templates tuned for wkhtmltopdf's rendering (for example its
   smart shrinking) may lay out differently.
