@@ -21,29 +21,33 @@
 //! - [`table`]: table layout
 //! - [`replaced`]: sizing and placing images
 //! - [`fonts`]: mapping CSS font families to fonts
+//! - [`webfonts`]: `@font-face` fonts
 
 mod boxes;
 mod fonts;
 mod inline;
 mod replaced;
 mod table;
+mod webfonts;
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use parley::{FontContext, LayoutContext};
-use presswork_dom::resource::{LoadError, Loader, display_url};
+use presswork_dom::resource::{Fetcher, LoadError};
 use presswork_dom::{Document, NodeId, NodeKind};
 use presswork_style::{Break, Color, ComputedStyle, Dimension, Display, Side, Stylist};
 
-use crate::LoadFailure;
 use crate::fragment::{Fill, ImageData, Item};
 use crate::geometry::Rect;
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
 pub(crate) use inline::Ink;
 use inline::Inline;
+pub(crate) use webfonts::WebFonts;
+#[cfg(test)]
+pub(crate) use webfonts::tests as webfont_tests;
 
 /// An unbreakable band of content.
 #[derive(Debug)]
@@ -206,18 +210,20 @@ pub(crate) struct Context<'a> {
     pub texts: &'a mut LayoutContext<Ink>,
     pub doc: &'a Document,
     pub styles: &'a Stylist,
-    pub loader: &'a dyn Loader,
+    pub fetcher: &'a Fetcher<'a>,
+    pub web_fonts: WebFonts<'a>,
+    /// Whether to load images at all (wkhtmltopdf's `--no-images`).
+    pub load_images: bool,
     /// Images by URL, `None` for those that failed, so each loads once.
     pub images: HashMap<String, Option<Arc<ImageData>>>,
-    pub failures: Vec<LoadFailure>,
 }
 
 impl Context<'_> {
-    /// The image at `url`, loaded on first use. Failures are recorded in
-    /// [`Context::failures`].
+    /// The image at `url`, loaded on first use. Failures are recorded by
+    /// the fetcher.
     fn image(&mut self, url: &str) -> Option<Arc<ImageData>> {
         let url = url.trim();
-        if url.is_empty() {
+        if url.is_empty() || !self.load_images {
             // Browsers do not load an empty `src` either.
             return None;
         }
@@ -225,16 +231,13 @@ impl Context<'_> {
             return image.clone();
         }
         let image = self
-            .loader
-            .load(url)
+            .fetcher
+            .try_fetch(url, None)
             .and_then(|bytes| ImageData::new(bytes, url).map_err(LoadError::Failed));
         let image = match image {
             Ok(image) => Some(Arc::new(image)),
             Err(error) => {
-                self.failures.push(LoadFailure {
-                    url: display_url(url).into_owned(),
-                    error,
-                });
+                self.fetcher.record(url, error);
                 None
             }
         };

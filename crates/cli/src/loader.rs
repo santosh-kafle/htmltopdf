@@ -1,12 +1,14 @@
-//! Loading the images a document refers to, under wkhtmltopdf 0.12.6's
-//! rules: local files only with `--enable-local-file-access` or inside an
-//! `--allow`ed path. presswork never uses the network.
+//! Loading the images, stylesheets and fonts a document refers to, under
+//! wkhtmltopdf 0.12.6's rules: local files only with
+//! `--enable-local-file-access` or inside an `--allow`ed path. presswork
+//! never uses the network. (`data:` URLs never reach the loader: the
+//! engine's fetcher decodes them.)
 
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
-use presswork_dom::resource::{LoadError, Loader, decode_data_url};
+use presswork_dom::resource::{LoadError, Loader};
 use presswork_layout::LoadFailure;
 use url::Url;
 
@@ -34,7 +36,7 @@ pub(crate) struct ResourceArgs {
     #[arg(long, overrides_with = "no_images")]
     pub images: bool,
 
-    /// What to do when an image fails to load
+    /// What to do when an image, stylesheet or font fails to load
     #[arg(long, value_name = "HANDLER", value_enum, default_value_t)]
     pub load_media_error_handling: ErrorHandling,
 }
@@ -44,7 +46,7 @@ pub(crate) struct ResourceArgs {
 pub(crate) enum ErrorHandling {
     /// Stop without writing the PDF
     Abort,
-    /// Warn and leave the image out
+    /// Warn and go on without it
     #[default]
     Ignore,
     /// The same as ignore
@@ -52,12 +54,9 @@ pub(crate) enum ErrorHandling {
 }
 
 impl ResourceArgs {
-    /// The loader for a document whose relative URLs resolve against
-    /// `base`.
-    pub fn loader(&self, base: Url) -> FileLoader {
+    /// The loader these options describe.
+    pub fn loader(&self) -> FileLoader {
         FileLoader {
-            base,
-            images: !self.no_images,
             all_files: self.enable_local_file_access,
             // Canonical, so neither `..` nor a symlink can lead outside an
             // allowed path. A path that does not exist allows nothing.
@@ -79,10 +78,6 @@ impl ResourceArgs {
         quiet: bool,
         strict: bool,
     ) -> Result<Vec<String>> {
-        if self.no_images {
-            // Asked for: every image was refused on purpose.
-            return Ok(Vec::new());
-        }
         let abort = self.load_media_error_handling == ErrorHandling::Abort;
         let mut warnings = Vec::new();
         for LoadFailure { url, error } in failures {
@@ -105,14 +100,9 @@ impl ResourceArgs {
     }
 }
 
-/// Loads `data:` URLs, and local files where the options allow.
+/// Loads local files where the options allow.
 #[derive(Debug)]
 pub(crate) struct FileLoader {
-    /// What relative URLs resolve against: the input document, or the
-    /// current directory for standard input.
-    base: Url,
-    /// Images may be loaded at all (no `--no-images`).
-    images: bool,
     /// `--enable-local-file-access`.
     all_files: bool,
     /// `--allow` paths, canonicalized.
@@ -149,19 +139,9 @@ impl FileLoader {
 }
 
 impl Loader for FileLoader {
-    fn load(&self, url: &str) -> Result<Vec<u8>, LoadError> {
-        if !self.images {
-            return Err(LoadError::Blocked("--no-images was given".to_owned()));
-        }
-        if let Some(data) = decode_data_url(url) {
-            return data;
-        }
-        let url = self
-            .base
-            .join(url.trim())
-            .map_err(|e| LoadError::Failed(format!("invalid URL: {e}")))?;
+    fn load(&self, url: &Url) -> Result<Vec<u8>, LoadError> {
         match url.scheme() {
-            "file" => self.read_file(&url),
+            "file" => self.read_file(url),
             "http" | "https" | "ftp" => Err(LoadError::Network),
             scheme => Err(LoadError::Failed(format!(
                 "unsupported URL scheme `{scheme}:`"
@@ -173,6 +153,7 @@ impl Loader for FileLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use presswork_dom::resource::Fetcher;
     use std::fs;
     use std::path::Path;
 
@@ -211,58 +192,64 @@ mod tests {
         }
     }
 
+    /// Loads `url` as the document at `fixture` would, with `resources`.
+    fn load(resources: &ResourceArgs, fixture: &Fixture, url: &str) -> Result<Vec<u8>, LoadError> {
+        let loader = resources.loader();
+        Fetcher::new(&loader, Some(fixture.base())).try_fetch(url, None)
+    }
+
     #[test]
     fn local_files_are_blocked_by_default() {
         let fixture = Fixture::new("default");
-        let loader = args(false, &[]).loader(fixture.base());
+        let resources = args(false, &[]);
         assert!(matches!(
-            loader.load("assets/logo.png"),
+            load(&resources, &fixture, "assets/logo.png"),
             Err(LoadError::Blocked(_))
         ));
         // data: URLs always load.
-        assert_eq!(loader.load("data:,hi").unwrap(), b"hi");
+        assert_eq!(load(&resources, &fixture, "data:,hi").unwrap(), b"hi");
     }
 
     #[test]
     fn enable_local_file_access_allows_relative_and_absolute_paths() {
         let fixture = Fixture::new("enable");
-        let loader = args(true, &[]).loader(fixture.base());
-        assert_eq!(loader.load("assets/logo.png").unwrap(), b"logo");
+        let resources = args(true, &[]);
+        let load = |url: &str| load(&resources, &fixture, url);
+        assert_eq!(load("assets/logo.png").unwrap(), b"logo");
         let absolute = fixture.0.join("assets/logo.png");
-        assert_eq!(loader.load(absolute.to_str().unwrap()).unwrap(), b"logo");
+        assert_eq!(load(absolute.to_str().unwrap()).unwrap(), b"logo");
         let url = Url::from_file_path(&absolute).unwrap();
-        assert_eq!(loader.load(url.as_str()).unwrap(), b"logo");
-        assert!(matches!(
-            loader.load("missing.png"),
-            Err(LoadError::Failed(_))
-        ));
+        assert_eq!(load(url.as_str()).unwrap(), b"logo");
+        assert!(matches!(load("missing.png"), Err(LoadError::Failed(_))));
     }
 
     #[test]
     fn allow_admits_only_its_own_directory() {
         let fixture = Fixture::new("allow");
         let assets = fixture.0.join("assets");
-        let loader = args(false, &[&assets]).loader(fixture.base());
-        assert_eq!(loader.load("assets/logo.png").unwrap(), b"logo");
+        let resources = args(false, &[&assets]);
+        let load = |url: &str| load(&resources, &fixture, url);
+        assert_eq!(load("assets/logo.png").unwrap(), b"logo");
+        assert!(matches!(load("secret.txt"), Err(LoadError::Blocked(_))));
         assert!(matches!(
-            loader.load("secret.txt"),
-            Err(LoadError::Blocked(_))
-        ));
-        assert!(matches!(
-            loader.load("assets/../secret.txt"),
+            load("assets/../secret.txt"),
             Err(LoadError::Blocked(_))
         ));
         // `url` normalizes `..` away, but a literal path can still try.
         let sneaky = format!("{}/../secret.txt", assets.display());
-        assert!(matches!(loader.load(&sneaky), Err(LoadError::Blocked(_))));
+        assert!(matches!(load(&sneaky), Err(LoadError::Blocked(_))));
     }
 
     #[test]
     fn network_urls_are_never_loaded() {
         let fixture = Fixture::new("network");
-        let loader = args(true, &[]).loader(fixture.base());
+        let resources = args(true, &[]);
         for url in ["https://example.com/logo.png", "//cdn.example.com/x.png"] {
-            assert_eq!(loader.load(url), Err(LoadError::Network), "{url}");
+            assert_eq!(
+                load(&resources, &fixture, url),
+                Err(LoadError::Network),
+                "{url}"
+            );
         }
     }
 
@@ -288,8 +275,5 @@ mod tests {
         resources.load_media_error_handling = ErrorHandling::Abort;
         let error = resources.report(&failures[1..], true, false).unwrap_err();
         assert!(error.to_string().contains("logo.png"), "{error}");
-
-        resources.no_images = true;
-        assert!(resources.report(&failures, false, true).unwrap().is_empty());
     }
 }

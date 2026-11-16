@@ -13,8 +13,9 @@
 //! `presswork-paint`. All geometry is expressed in typographic points
 //! (1pt = 1/72 in).
 //!
-//! Images are loaded through a [`Loader`], which decides what may be read;
-//! layout itself never touches files or the network.
+//! Images and `@font-face` fonts are loaded through a [`Fetcher`], whose
+//! [`Loader`] decides what may be read; layout itself never touches files
+//! or the network.
 
 mod flow;
 pub mod fragment;
@@ -27,7 +28,7 @@ use std::fmt;
 
 use parley::{FontContext, LayoutContext};
 use presswork_dom::Document;
-pub use presswork_dom::resource::{DataUrls, LoadError, Loader};
+pub use presswork_dom::resource::{DataUrls, Fetcher, LoadError, LoadFailure, Loader};
 use presswork_style::Stylist;
 
 pub use fragment::{
@@ -41,6 +42,8 @@ pub use page::{Orientation, PageSize};
 pub struct LayoutOptions {
     pub page_size: Size,
     pub margins: EdgeSizes,
+    /// Whether to load images; without them, `alt` text shows instead.
+    pub images: bool,
 }
 
 /// wkhtmltopdf's default page margin: 10mm.
@@ -52,25 +55,9 @@ impl Default for LayoutOptions {
         Self {
             page_size: PageSize::A4.size(Orientation::Portrait),
             margins: EdgeSizes::uniform(DEFAULT_MARGIN),
+            images: true,
         }
     }
-}
-
-/// The result of [`Engine::layout`].
-#[derive(Debug)]
-pub struct Output {
-    pub pages: Vec<Page>,
-    /// Resources that could not be loaded, each listed once. The document
-    /// is laid out without them.
-    pub failures: Vec<LoadFailure>,
-}
-
-/// A resource that could not be loaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadFailure {
-    /// The URL as written in the document, shortened if very long.
-    pub url: String,
-    pub error: LoadError,
 }
 
 /// Lays out documents. Holds the font database, which is expensive to
@@ -79,6 +66,8 @@ pub struct Engine {
     fonts: FontContext,
     generics: flow::GenericFonts,
     texts: LayoutContext<flow::Ink>,
+    /// Layouts so far, to give each its own `@font-face` names.
+    layouts: u64,
 }
 
 impl fmt::Debug for Engine {
@@ -102,6 +91,7 @@ impl Engine {
             fonts,
             generics,
             texts: LayoutContext::new(),
+            layouts: 0,
         }
     }
 
@@ -114,15 +104,16 @@ impl Engine {
         self.generics.any()
     }
 
-    /// Lays out `doc`, styled by `styles`, into pages. Images come from
-    /// `loader`; pass [`DataUrls`] to load only inline `data:` images.
+    /// Lays out `doc`, styled by `styles`, into pages. Images and fonts
+    /// load through `fetcher`, which records those that fail; use
+    /// [`Fetcher::data_only`] to load only inline `data:` URLs.
     pub fn layout(
         &mut self,
         doc: &Document,
         styles: &Stylist,
         options: &LayoutOptions,
-        loader: &dyn Loader,
-    ) -> Output {
+        fetcher: &Fetcher<'_>,
+    ) -> Vec<Page> {
         let margins = options.margins;
         let width = (options.page_size.width - margins.left - margins.right).max(0.0);
 
@@ -132,20 +123,20 @@ impl Engine {
             texts: &mut self.texts,
             doc,
             styles,
-            loader,
+            fetcher,
+            web_fonts: flow::WebFonts::new(styles.font_faces(), self.layouts),
+            load_images: options.images,
             images: HashMap::new(),
-            failures: Vec::new(),
         };
+        self.layouts += 1;
         let mut flow = flow::Flow::new(&mut context);
         if let Some(root) = doc.document_element() {
             let style = styles.style(doc, root, None);
             flow.block(root, &style, 0.0, width);
         }
         let (canvas, _height) = flow.finish();
-        Output {
-            pages: paginate::paginate(canvas, options.page_size, margins),
-            failures: context.failures,
-        }
+        context.web_fonts.unregister(context.fonts);
+        paginate::paginate(canvas, options.page_size, margins)
     }
 }
 

@@ -60,6 +60,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("images", None, Pass(0)),
     ("no-images", None, Pass(0)),
     ("load-media-error-handling", None, Pass(1)),
+    ("user-style-sheet", None, Pass(1)),
     // Already the default behavior: no JavaScript, no plugins, print media.
     ("disable-javascript", Some('n'), Accept(0)),
     ("disable-plugins", None, Accept(0)),
@@ -137,7 +138,6 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("ssl-key-path", None, Ignore(1)),
     ("disable-toc-back-links", None, Ignore(0)),
     ("enable-toc-back-links", None, Ignore(0)),
-    ("user-style-sheet", None, Lossy(1)),
     ("username", None, Ignore(1)),
     ("viewport-size", None, Lossy(1)),
     ("window-status", None, Lossy(1)),

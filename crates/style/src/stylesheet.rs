@@ -1,10 +1,12 @@
-//! Stylesheet parsing: style rules, `@media`, `@page` and `style=""`.
+//! Stylesheet parsing: style rules, `@media`, `@page`, `@import`,
+//! `@font-face` and `style=""`.
 
 use cssparser::{
     AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, Delimiter, ParseError, Parser,
     ParserState, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
     parse_important,
 };
+use presswork_dom::resource::Url;
 use selectors::SelectorList;
 
 use crate::properties::{PropertyDeclaration, parse_declaration};
@@ -58,23 +60,72 @@ impl PageRule {
     }
 }
 
+/// An `@font-face` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    pub family: String,
+    /// In order of preference.
+    pub sources: Vec<FontSource>,
+    /// `None` for a weight range (a variable font): the font's own
+    /// weight is used.
+    pub weight: Option<f32>,
+    pub italic: bool,
+    /// The stylesheet's URL, which relative source URLs resolve against;
+    /// `None` for a `<style>` element (the document's URL).
+    pub base: Option<Url>,
+}
+
+/// One entry of an `@font-face` `src` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontSource {
+    /// A font file, with its `format()` hint, lowercase.
+    Url { url: String, format: Option<String> },
+    /// `local()`: an installed font, by full name.
+    Local(String),
+}
+
+impl FontFace {
+    fn new() -> Self {
+        Self {
+            family: String::new(),
+            sources: Vec::new(),
+            weight: Some(400.0),
+            italic: false,
+            base: None,
+        }
+    }
+}
+
+/// An `@import` rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Import {
+    pub url: String,
+    /// Whether its media query list matches print.
+    pub applies: bool,
+}
+
 /// A parsed stylesheet.
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
     pub(crate) rules: Vec<StyleRule>,
     pub(crate) page: PageRule,
+    pub(crate) imports: Vec<Import>,
+    pub(crate) font_faces: Vec<FontFace>,
 }
 
 impl Stylesheet {
     /// Parses a stylesheet. Invalid rules and declarations are skipped, as
     /// CSS error handling requires.
     ///
-    /// `@media` rules apply when they match print media; `@import`,
-    /// `@font-face` and other at-rules are ignored.
+    /// `@media` rules apply when they match print media. `@import` rules
+    /// are collected for the cascade to load; other at-rules are ignored.
     pub fn parse(css: &str) -> Self {
         let mut parser = Parser::new(css);
         let mut sheet = Stylesheet::default();
-        sheet.extend(parse_rules(&mut parser));
+        let rules = StyleSheetParser::new(&mut parser, &mut RuleParser { top_level: true })
+            .flatten()
+            .collect();
+        sheet.extend(rules);
         sheet
     }
 
@@ -84,6 +135,16 @@ impl Stylesheet {
                 Rule::Style(rule) => self.rules.push(rule),
                 Rule::Nested(rules) => self.extend(rules),
                 Rule::Page(page) => self.page.merge(&page),
+                // Imports after other rules are invalid.
+                Rule::Import(import) if self.rules.is_empty() && self.font_faces.is_empty() => {
+                    self.imports.push(import);
+                }
+                Rule::Import(_) => {}
+                Rule::FontFace(face) => {
+                    if !face.family.is_empty() && !face.sources.is_empty() {
+                        self.font_faces.push(face);
+                    }
+                }
             }
         }
     }
@@ -107,6 +168,8 @@ enum Rule {
     /// The rules inside a conditional group rule that applies.
     Nested(Vec<Rule>),
     Page(PageRule),
+    Import(Import),
+    FontFace(FontFace),
 }
 
 enum AtRulePrelude {
@@ -114,12 +177,18 @@ enum AtRulePrelude {
     Conditional(bool),
     /// `@page`, with whether it has no page selector.
     Page(bool),
+    Import(Import),
+    FontFace,
 }
 
-struct RuleParser;
+struct RuleParser {
+    /// Not inside a conditional rule, where `@import` is invalid.
+    top_level: bool,
+}
 
-fn parse_rules(input: &mut Parser<'_>) -> Vec<Rule> {
-    StyleSheetParser::new(input, &mut RuleParser)
+/// Parses the rules inside a conditional group rule.
+fn parse_nested_rules(input: &mut Parser<'_>) -> Vec<Rule> {
+    StyleSheetParser::new(input, &mut RuleParser { top_level: false })
         .flatten()
         .collect()
 }
@@ -176,6 +245,32 @@ impl<'i> AtRuleParser<'i> for RuleParser {
                 skip_rest(input);
                 Ok(AtRulePrelude::Page(plain))
             }
+            "import" if self.top_level => {
+                let url = input.expect_url_or_string()?.as_ref().to_owned();
+                // Cascade layers and import conditions are not supported:
+                // the import applies unconditionally, in place.
+                let _ = input.try_parse(|i| i.expect_ident_matching("layer"));
+                let _ = input.try_parse(|i| {
+                    i.expect_function_matching("layer")?;
+                    i.parse_nested_block(|i| {
+                        skip_rest(i);
+                        Ok::<_, ParseError<Invalid>>(())
+                    })
+                });
+                let _ = input.try_parse(|i| {
+                    i.expect_function_matching("supports")?;
+                    i.parse_nested_block(|i| {
+                        skip_rest(i);
+                        Ok::<_, ParseError<Invalid>>(())
+                    })
+                });
+                let applies = evaluate_media(input);
+                Ok(AtRulePrelude::Import(Import { url, applies }))
+            }
+            "font-face" => {
+                skip_rest(input);
+                Ok(AtRulePrelude::FontFace)
+            }
             _ => Err(ParseError::from_basic_kind(
                 BasicParseErrorKind::AtRuleInvalid,
             )),
@@ -189,14 +284,155 @@ impl<'i> AtRuleParser<'i> for RuleParser {
         input: &mut Parser<'i>,
     ) -> Result<Rule, ParseError<Self::Error>> {
         Ok(match prelude {
-            AtRulePrelude::Conditional(true) => Rule::Nested(parse_rules(input)),
+            AtRulePrelude::Conditional(true) => Rule::Nested(parse_nested_rules(input)),
             AtRulePrelude::Page(true) => Rule::Page(parse_page_rule(input)),
-            AtRulePrelude::Conditional(false) | AtRulePrelude::Page(false) => {
+            AtRulePrelude::FontFace => Rule::FontFace(parse_font_face(input)),
+            AtRulePrelude::Conditional(false)
+            | AtRulePrelude::Page(false)
+            | AtRulePrelude::Import(_) => {
                 skip_rest(input);
                 Rule::Nested(Vec::new())
             }
         })
     }
+
+    fn rule_without_block(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+    ) -> Result<Rule, ()> {
+        match prelude {
+            AtRulePrelude::Import(import) => Ok(Rule::Import(import)),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Parses the descriptors of an `@font-face` rule.
+fn parse_font_face(input: &mut Parser<'_>) -> FontFace {
+    let mut parser = FontFaceParser(FontFace::new());
+    for _ in RuleBodyParser::new(input, &mut parser) {}
+    parser.0
+}
+
+struct FontFaceParser(FontFace);
+
+impl<'i> DeclarationParser<'i> for FontFaceParser {
+    type Declaration = ();
+    type Error = Invalid;
+
+    fn parse_value(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i>,
+        _start: &ParserState,
+    ) -> Result<(), ParseError<Invalid>> {
+        let face = &mut self.0;
+        match name.to_ascii_lowercase().as_str() {
+            "font-family" => {
+                face.family = match input.try_parse(|i| i.expect_string_cloned()) {
+                    Ok(name) => name.as_ref().to_owned(),
+                    Err(_) => {
+                        let mut words = Vec::new();
+                        while let Ok(word) = input.expect_ident_cloned() {
+                            words.push(word.as_ref().to_owned());
+                        }
+                        words.join(" ")
+                    }
+                };
+            }
+            "src" => {
+                face.sources = input
+                    .parse_comma_separated_ignoring_errors(parse_font_source)
+                    .into_iter()
+                    .collect();
+            }
+            "font-weight" => {
+                let weight = |i: &mut Parser<'i>| -> Result<f32, ParseError<Invalid>> {
+                    if i.try_parse(|i| i.expect_ident_matching("normal")).is_ok() {
+                        return Ok(400.0);
+                    }
+                    if i.try_parse(|i| i.expect_ident_matching("bold")).is_ok() {
+                        return Ok(700.0);
+                    }
+                    Ok(i.expect_number()?)
+                };
+                let first = weight(input)?;
+                face.weight = match input.try_parse(weight) {
+                    Ok(_) => None,
+                    Err(_) => Some(first),
+                };
+            }
+            "font-style" => {
+                let style = input.expect_ident_cloned()?;
+                face.italic = matches!(style.to_ascii_lowercase().as_str(), "italic" | "oblique");
+                skip_rest(input);
+            }
+            _ => skip_rest(input),
+        }
+        Ok(())
+    }
+}
+
+impl AtRuleParser<'_> for FontFaceParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = Invalid;
+}
+
+impl QualifiedRuleParser<'_> for FontFaceParser {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = Invalid;
+}
+
+impl RuleBodyItemParser<'_, (), Invalid> for FontFaceParser {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// One `src` entry: `url(...) format(...)` or `local(...)`. Unknown
+/// trailing functions such as `tech()` are ignored.
+fn parse_font_source<'i>(input: &mut Parser<'i>) -> Result<FontSource, ParseError<Invalid>> {
+    if input
+        .try_parse(|i| i.expect_function_matching("local"))
+        .is_ok()
+    {
+        let name =
+            input.parse_nested_block(|i| match i.try_parse(|i| i.expect_string_cloned()) {
+                Ok(name) => Ok(name.as_ref().to_owned()),
+                Err(_) => {
+                    let mut words = Vec::new();
+                    while let Ok(word) = i.expect_ident_cloned() {
+                        words.push(word.as_ref().to_owned());
+                    }
+                    Ok::<_, ParseError<Invalid>>(words.join(" "))
+                }
+            })?;
+        return Ok(FontSource::Local(name));
+    }
+    let url = input.expect_url_or_string()?.as_ref().to_owned();
+    let mut format = None;
+    while !input.is_exhausted() {
+        let function = input.expect_function()?.as_ref().to_ascii_lowercase();
+        let value = input.parse_nested_block(|i| {
+            let value = match i.next()? {
+                Token::QuotedString(s) | Token::Ident(s) => s.as_ref().to_ascii_lowercase(),
+                _ => String::new(),
+            };
+            skip_rest(i);
+            Ok::<_, ParseError<Invalid>>(value)
+        })?;
+        if function == "format" {
+            format = Some(value);
+        }
+    }
+    Ok(FontSource::Url { url, format })
 }
 
 /// Parses a declaration block: the body of a style rule or a `style=""`.
@@ -524,5 +760,60 @@ mod tests {
         let sheet = Stylesheet::parse("@page { size: 100mm 200mm }");
         let (w, h) = sheet.page.size.unwrap().dimensions.unwrap();
         assert!((w - 283.46).abs() < 0.01 && (h - 566.93).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_font_faces() {
+        let sheet = Stylesheet::parse(
+            "@font-face {
+                font-family: 'Noto Sans Devanagari';
+                src: local(Mangal), url(a.woff2) format('woff2'),
+                     url(\"a.ttf\") format(\"truetype\") tech(variations);
+                font-weight: bold;
+                font-style: italic;
+                unicode-range: U+0900-097F;
+            }
+            @font-face { font-family: Brand Sans; src: url(b.otf); font-weight: 100 900 }
+            @font-face { src: url(no-family.ttf) }",
+        );
+        let faces = sheet.font_faces;
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0].family, "Noto Sans Devanagari");
+        assert_eq!(
+            faces[0].sources,
+            [
+                FontSource::Local("Mangal".into()),
+                FontSource::Url {
+                    url: "a.woff2".into(),
+                    format: Some("woff2".into())
+                },
+                FontSource::Url {
+                    url: "a.ttf".into(),
+                    format: Some("truetype".into())
+                },
+            ]
+        );
+        assert_eq!((faces[0].weight, faces[0].italic), (Some(700.0), true));
+        assert_eq!(faces[1].family, "Brand Sans");
+        assert_eq!((faces[1].weight, faces[1].italic), (None, false));
+    }
+
+    #[test]
+    fn imports_only_at_the_top() {
+        let sheet = Stylesheet::parse(
+            "@charset 'utf-8'; @import url(a.css); @import 'b.css' screen;
+             @import 'c.css' print, screen;
+             @media print { @import 'nested.css'; }
+             p {} @import 'late.css';",
+        );
+        let imports: Vec<(&str, bool)> = sheet
+            .imports
+            .iter()
+            .map(|i| (i.url.as_str(), i.applies))
+            .collect();
+        assert_eq!(
+            imports,
+            [("a.css", true), ("b.css", false), ("c.css", true)]
+        );
     }
 }

@@ -13,8 +13,9 @@ maintained, and accepts the same command line.
 
 - **HTML to PDF, end to end.** HTML5 parsing; paragraphs, headings, lists
   with hanging markers, preformatted text and tables.
-- **CSS.** `<style>` elements, `style=""` attributes and a built-in default
-  stylesheet, with the full cascade (specificity, source order,
+- **CSS.** `<style>` elements, `<link rel=stylesheet>`, `@import`,
+  `style=""` attributes and a built-in default stylesheet, with the full
+  cascade (specificity, source order,
   `!important`, inheritance) and Selectors Level 4 matching (`:nth-child`,
   `:not`, `:is`, attribute selectors, combinators). `@media print` rules
   apply; `@media screen` rules do not. Supported properties:
@@ -26,16 +27,19 @@ maintained, and accepts the same command line.
   - tables: `border-collapse`, `border-spacing`, `vertical-align`
   - lists: `list-style-type`
   - pages: `break-before`, `break-after` and the `page-break-*` aliases
+  - fonts: `@font-face` with TrueType, OpenType and WOFF files, loaded only
+    when text uses them
 - **Legacy HTML attributes** that wkhtmltopdf-era templates rely on:
   `align`, `valign`, `width`, `height`, `bgcolor`, `border`, `cellpadding`,
   `cellspacing`, `nowrap` and `<font>`.
 - **Images.** PNG, JPEG, GIF and WebP in `<img>`, inline or as blocks,
-  sized by their attributes and CSS and scaled to fit with `max-width`.
-  `data:` URLs always load. Local files load only with
-  `--enable-local-file-access` or from a directory given with `--allow`,
-  as in wkhtmltopdf 0.12.6, and relative paths resolve against the input
-  file (or the current directory for standard input). An image that fails
-  to load is reported and replaced by its `alt` text.
+  sized by their attributes and CSS and scaled to fit with `max-width`. An
+  image that fails to load is reported and replaced by its `alt` text.
+- **Linked files.** Images, stylesheets and fonts given as `data:` URLs
+  always load. Local files load only with `--enable-local-file-access` or
+  from a directory given with `--allow`, as in wkhtmltopdf 0.12.6.
+  Relative URLs resolve against the input file (or the current directory
+  for standard input), and inside a stylesheet against the stylesheet.
 - **Tables.** Columns are sized to their content, with `colspan`, cell
   borders and backgrounds, and collapsed borders. Rows are never split
   across pages, and `<thead>` rows repeat at the top of every page.
@@ -69,12 +73,14 @@ maintained, and accepts the same command line.
   `-T` / `-R` / `-B` / `-L` (`--margin-*`) and `--title` are supported.
   Options given on the command line win over the document's `@page` rule.
 - **Resource options.** `--enable-local-file-access`,
-  `--disable-local-file-access`, `--allow`, `--images`, `--no-images` and
-  `--load-media-error-handling` (`abort` stops without writing the PDF).
+  `--disable-local-file-access`, `--allow`, `--images`, `--no-images`,
+  `--load-media-error-handling` (`abort` stops without writing the PDF) and
+  `--user-style-sheet`, which the document's own styles override unless it
+  uses `!important`. The user stylesheet is read whatever the file access
+  options say, since whoever runs presswork named it.
 
-Not yet: SVG and CSS background images, linked stylesheets (`<link>`),
-`@font-face`, floats and
-positioning, flexbox and grid, generated content (`::before`), text
+Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
+floats and positioning, flexbox and grid, generated content (`::before`), text
 decoration, `height`, row-spanning cells (they occupy their first row only),
 and the wkhtmltopdf header, footer and table-of-contents options.
 
@@ -101,7 +107,8 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
   `@media screen` rules do not apply. wkhtmltopdf uses `screen` unless
   `--print-media-type` is given.
 - **System fonts.** Fonts come from the system's font configuration, so
-  output can differ between machines with different fonts installed. On
+  output can differ between machines with different fonts installed. Use
+  `@font-face` to make a document look the same everywhere. On
   Linux, fontconfig is loaded at runtime: building needs no fontconfig
   development package, but rendering text needs fontconfig and fonts
   installed (presswork warns if it finds none).

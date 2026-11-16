@@ -9,12 +9,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
-use presswork_layout::{Engine, LoadError, LoadFailure};
+use presswork_layout::{Engine, Fetcher, LoadError, LoadFailure};
 use presswork_paint::PdfOptions;
 use presswork_style::Stylist;
 use url::Url;
 
-use loader::{FileLoader, ResourceArgs};
+use loader::ResourceArgs;
 use page::PageArgs;
 
 /// Convert HTML documents to PDF.
@@ -38,6 +38,11 @@ struct Cli {
     /// Document title written to the PDF metadata.
     #[arg(long)]
     title: Option<String>,
+
+    /// A stylesheet (path or file: URL) applied to the document as a user
+    /// stylesheet: the document's own styles win unless it says !important
+    #[arg(long, value_name = "PATH")]
+    user_style_sheet: Option<String>,
 
     /// Do not print warnings, except about ignored options and network
     /// resources, which change the output.
@@ -191,11 +196,38 @@ impl Cli {
     }
 }
 
+/// Reads `--user-style-sheet`: a path or `file:` URL, given by whoever
+/// runs presswork, so the document's file access rules do not apply to it.
+/// Returns the CSS and its URL.
+fn read_user_style_sheet(value: &str) -> Result<(String, Url)> {
+    let path = if value.starts_with("file:") {
+        file_url_to_path(value)?
+    } else if value.contains("://") {
+        bail!("loading stylesheets from URLs is not supported: {value}");
+    } else {
+        std::path::absolute(value).with_context(|| format!("failed to resolve {value}"))?
+    };
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let url = Url::from_file_path(&path)
+        .map_err(|()| anyhow::anyhow!("cannot make a URL for {}", path.display()))?;
+    let css = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
+    Ok((css.into_owned(), url))
+}
+
 /// Runs the whole pipeline: parse, style, lay out, write the PDF.
-fn render(html: &[u8], cli: &Cli, loader: &FileLoader) -> Result<Vec<u8>> {
+fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
     let doc = presswork_dom::parse_html(html);
-    let styles = Stylist::for_document(&doc);
-    let layout = cli.page.layout_options(styles.page());
+    let loader = cli.resources.loader();
+    let fetcher = Fetcher::new(&loader, Some(base));
+    let mut styles = Stylist::new();
+    if let Some(sheet) = &cli.user_style_sheet {
+        let (css, url) = read_user_style_sheet(sheet)?;
+        styles.add_user_stylesheet(&css, Some(url), &fetcher);
+    }
+    styles.add_document(&doc, &fetcher);
+    let mut layout = cli.page.layout_options(styles.page());
+    layout.images = !cli.resources.no_images;
     let mut engine = Engine::new();
     if !engine.has_system_fonts() {
         // Always shown: the PDF would have no visible text.
@@ -204,15 +236,15 @@ fn render(html: &[u8], cli: &Cli, loader: &FileLoader) -> Result<Vec<u8>> {
              install fontconfig and at least one font package"
         );
     }
-    let output = engine.layout(&doc, &styles, &layout, loader);
+    let pages = engine.layout(&doc, &styles, &layout, &fetcher);
     let options = PdfOptions {
         // wkhtmltopdf uses the document's <title> unless --title is given.
         title: cli.title.clone().or_else(|| doc.title()),
         author: None,
     };
-    let pdf = presswork_paint::render_pdf(&output.pages, &options)?;
+    let pdf = presswork_paint::render_pdf(&pages, &options)?;
 
-    let mut failures = output.failures;
+    let mut failures = fetcher.failures();
     failures.extend(pdf.broken_images.into_iter().map(|url| LoadFailure {
         url,
         error: LoadError::Failed("the image data is corrupt".to_owned()),
@@ -236,8 +268,7 @@ fn main() -> Result<()> {
 
     let (source, sink) = cli.io()?;
     let html = source.read()?;
-    let loader = cli.resources.loader(source.base_url()?);
-    let pdf = render(&html, &cli, &loader)?;
+    let pdf = render(&html, &cli, source.base_url()?)?;
     sink.write(&pdf)
 }
 

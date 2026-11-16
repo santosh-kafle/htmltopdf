@@ -1067,6 +1067,7 @@ version = "0.1.0"
 dependencies = [
  "data-url",
  "html5ever",
+ "url",
 ]
 
 [[package]]
@@ -1075,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "fontique",
  "imagesize",
+ "miniz_oxide 0.9.1",
  "parley",
  "presswork-dom",
  "presswork-style",

@@ -6,15 +6,27 @@ use presswork_style::Stylist;
 use super::*;
 
 fn layout_with(html: &str, options: &LayoutOptions) -> Vec<Page> {
-    let output = output_with(html, options);
-    assert_eq!(output.failures, [], "every resource loads");
-    output.pages
+    let (pages, failures) = with_failures(html, options);
+    assert_eq!(failures, [], "every resource loads");
+    pages
 }
 
-fn output_with(html: &str, options: &LayoutOptions) -> Output {
+/// The pages, and the resources that failed to load.
+fn with_failures(html: &str, options: &LayoutOptions) -> (Vec<Page>, Vec<LoadFailure>) {
+    let fetcher = Fetcher::data_only();
+    let pages = layout_fetching(&mut Engine::new(), html, options, &fetcher);
+    (pages, fetcher.failures())
+}
+
+fn layout_fetching(
+    engine: &mut Engine,
+    html: &str,
+    options: &LayoutOptions,
+    fetcher: &Fetcher<'_>,
+) -> Vec<Page> {
     let doc = parse_html(html.as_bytes());
-    let styles = Stylist::for_document(&doc);
-    Engine::new().layout(&doc, &styles, options, &DataUrls)
+    let styles = Stylist::for_document(&doc, fetcher);
+    engine.layout(&doc, &styles, options, fetcher)
 }
 
 fn layout(html: &str) -> Vec<Page> {
@@ -408,6 +420,7 @@ fn page_size_and_margins_come_from_options() {
             bottom: 0.0,
             left: 40.0,
         },
+        images: true,
     };
     let pages = layout_with("<body style='margin:0'><p style='margin:0'>x</p>", &options);
     let page = &pages[0];
@@ -574,24 +587,25 @@ fn max_width_fits_a_large_image_into_its_table_cell() {
 
 #[test]
 fn missing_image_shows_its_alt_text_and_is_reported_once() {
-    let output = output_with(
+    let (pages, failures) = with_failures(
         "<p><img src='logo.png' alt='ACME Ltd'> and again <img src=' logo.png '></p>",
         &LayoutOptions::default(),
     );
-    assert_eq!(words(&output.pages[0]), ["ACME Ltd and again"]);
-    assert!(images(&output.pages[0]).is_empty());
-    assert_eq!(output.failures.len(), 1);
-    assert_eq!(output.failures[0].url, "logo.png");
-    assert!(matches!(output.failures[0].error, LoadError::Blocked(_)));
+    assert_eq!(words(&pages[0]), ["ACME Ltd and again"]);
+    assert!(images(&pages[0]).is_empty());
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].url, "logo.png");
+    // Relative, and the document has no location.
+    assert!(matches!(failures[0].error, LoadError::Failed(_)));
 }
 
 #[test]
 fn missing_image_with_a_size_keeps_its_box() {
-    let output = output_with(
+    let (pages, _) = with_failures(
         "<p><img src='logo.png' width=100 height=40 style='border: 2px solid red'>x</p>",
         &LayoutOptions::default(),
     );
-    let page = &output.pages[0];
+    let page = &pages[0];
     let border: Vec<Fill> = fills(page).into_iter().filter(|f| f.color == RED).collect();
     assert_eq!(border.len(), 4);
     let left = border
@@ -605,15 +619,14 @@ fn missing_image_with_a_size_keeps_its_box() {
 
 #[test]
 fn unsupported_image_formats_are_reported() {
-    let output = output_with(
+    let (_, failures) = with_failures(
         "<img src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22/%3E'>",
         &LayoutOptions::default(),
     );
-    assert_eq!(output.failures.len(), 1);
+    assert_eq!(failures.len(), 1);
     assert!(
-        output.failures[0].error.to_string().contains("SVG"),
-        "{:?}",
-        output.failures
+        failures[0].error.to_string().contains("SVG"),
+        "{failures:?}"
     );
 }
 
@@ -623,4 +636,118 @@ fn an_image_that_does_not_fit_moves_to_the_next_page() {
     let pages = layout(&format!("{image}{image}"));
     assert_eq!(pages.len(), 2);
     assert_eq!(images(&pages[1])[0].origin.y, M);
+}
+
+/// The file and glyphs of the system font that sans-serif text uses, or
+/// `None` if it is a font collection, which these tests cannot reuse.
+fn system_sans() -> Option<(Vec<u8>, Vec<u32>, u64)> {
+    let pages = layout("<p style='font-family: sans-serif'>Invoice 42</p>");
+    let run = run_with(&pages[0], "Invoice");
+    let bytes = run.font.data.data().to_vec();
+    if bytes.starts_with(b"ttcf") || run.font.index != 0 {
+        eprintln!("skipped: the sans-serif font is in a collection");
+        return None;
+    }
+    let glyphs = run.glyphs.iter().map(|g| g.id).collect();
+    Some((bytes, glyphs, run.font.data.id()))
+}
+
+/// A `data:` URL for `bytes`, percent-encoded.
+fn data_url(bytes: &[u8]) -> String {
+    let mut url = String::from("data:font/ttf,");
+    for byte in bytes {
+        url.push_str(&format!("%{byte:02X}"));
+    }
+    url
+}
+
+/// The run containing "Invoice" when `html` declares the family Brand.
+fn brand_run(engine: &mut Engine, css: &str, fetcher: &Fetcher<'_>) -> (Vec<u32>, u64) {
+    let html = format!("<style>{css}</style><p style='font-family: Brand, serif'>Invoice 42</p>");
+    let pages = layout_fetching(engine, &html, &LayoutOptions::default(), fetcher);
+    let run = run_with(&pages[0], "Invoice");
+    (
+        run.glyphs.iter().map(|g| g.id).collect(),
+        run.font.data.id(),
+    )
+}
+
+#[test]
+fn font_face_fonts_are_used_and_do_not_leak_into_the_next_document() {
+    let Some((bytes, glyphs, system_id)) = system_sans() else {
+        return;
+    };
+    let css = format!(
+        "@font-face {{ font-family: Brand; src: url(missing.woff2) format('woff2'), url({}) }}",
+        data_url(&bytes)
+    );
+    let mut engine = Engine::new();
+    let fetcher = Fetcher::data_only();
+    let (brand_glyphs, brand_id) = brand_run(&mut engine, &css, &fetcher);
+    assert_eq!(brand_glyphs, glyphs, "the @font-face font shapes the text");
+    assert_ne!(brand_id, system_id, "from the document, not the system");
+    assert_eq!(
+        fetcher.failures(),
+        [],
+        "the WOFF2 source is skipped quietly"
+    );
+
+    // Unregistered once layout is done.
+    let registered = engine.fonts.collection.family_by_name("presswork 0 Brand");
+    assert!(registered.is_none_or(|family| family.fonts().is_empty()));
+
+    // The same engine, a document without the rule: Brand is unknown.
+    let (_, fallback_id) = brand_run(&mut engine, "", &fetcher);
+    assert_ne!(fallback_id, brand_id);
+}
+
+#[test]
+fn woff_fonts_are_decoded() {
+    let Some((bytes, glyphs, _)) = system_sans() else {
+        return;
+    };
+    let woff = flow::webfont_tests::encode_woff(&bytes);
+    let css = format!(
+        "@font-face {{ font-family: Brand; src: url({}) format('woff') }}",
+        data_url(&woff)
+    );
+    let fetcher = Fetcher::data_only();
+    let (brand_glyphs, _) = brand_run(&mut Engine::new(), &css, &fetcher);
+    assert_eq!(fetcher.failures(), []);
+    assert_eq!(brand_glyphs, glyphs);
+}
+
+#[test]
+fn fonts_load_only_when_used_and_failures_are_reported() {
+    let fetcher = Fetcher::data_only();
+    let css = "@font-face { font-family: Unused; src: url(unused.ttf) }
+               @font-face { font-family: Brand; src: url(data:font/ttf,nonsense) }";
+    let (glyphs, _) = brand_run(&mut Engine::new(), css, &fetcher);
+    assert!(glyphs.iter().all(|&g| g != 0), "falls back to serif");
+    let failures = fetcher.failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].url.starts_with("data:font/ttf"));
+    assert!(failures[0].error.to_string().contains("not a font"));
+
+    // A family with only WOFF2 sources says so.
+    let fetcher = Fetcher::data_only();
+    let css = "@font-face { font-family: Brand; src: url(b.woff2) format('woff2') }";
+    brand_run(&mut Engine::new(), css, &fetcher);
+    let failures = fetcher.failures();
+    assert!(
+        failures[0].error.to_string().contains("not supported"),
+        "{failures:?}"
+    );
+}
+
+#[test]
+fn no_images_shows_alt_text_without_failures() {
+    let options = LayoutOptions {
+        images: false,
+        ..LayoutOptions::default()
+    };
+    let (pages, failures) = with_failures(&format!("<img src='{PNG}' alt='Logo'>"), &options);
+    assert!(images(&pages[0]).is_empty());
+    assert_eq!(words(&pages[0]), ["Logo"]);
+    assert_eq!(failures, []);
 }

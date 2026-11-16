@@ -1,5 +1,6 @@
 //! The cascade: deciding which declarations apply to an element.
 
+use presswork_dom::resource::{Fetcher, Url};
 use presswork_dom::{Document, NodeId};
 use selectors::context::SelectorCaches;
 use selectors::parser::Selector;
@@ -8,7 +9,9 @@ use crate::computed::ComputedStyle;
 use crate::hints::presentational_hints;
 use crate::properties::{Display, LonghandId, PropertyDeclaration};
 use crate::selector::{ElementRef, Simple};
-use crate::stylesheet::{Declaration, PageRule, Stylesheet, media_matches, parse_style_attribute};
+use crate::stylesheet::{
+    Declaration, FontFace, PageRule, Stylesheet, media_matches, parse_style_attribute,
+};
 
 /// The built-in stylesheet for HTML.
 const USER_AGENT_CSS: &str = include_str!("ua.css");
@@ -17,20 +20,27 @@ const USER_AGENT_CSS: &str = include_str!("ua.css");
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
     UserAgent,
+    /// wkhtmltopdf's `--user-style-sheet`.
+    User,
     Author,
 }
 
 /// Cascade precedence, lowest first (CSS Cascade 4, section 6.1, without
-/// user styles, animations or transitions).
+/// animations or transitions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Level {
     UserAgent,
+    User,
     /// Presentational hints: author level, below every author rule.
     Hint,
     Author,
     AuthorImportant,
+    UserImportant,
     UserAgentImportant,
 }
+
+/// How deep `@import`s may nest.
+const MAX_IMPORT_DEPTH: usize = 16;
 
 /// One selector of a style rule with the rule's declarations.
 #[derive(Debug)]
@@ -52,6 +62,7 @@ pub struct Stylist {
     rules: Vec<CascadeRule>,
     blocks: Vec<Vec<Declaration>>,
     page: PageRule,
+    font_faces: Vec<FontFace>,
 }
 
 impl Default for Stylist {
@@ -67,15 +78,24 @@ impl Stylist {
             rules: Vec::new(),
             blocks: Vec::new(),
             page: PageRule::default(),
+            font_faces: Vec::new(),
         };
         stylist.add(Origin::UserAgent, Stylesheet::parse(USER_AGENT_CSS));
         stylist
     }
 
     /// A stylist for `doc`: the user-agent stylesheet plus the document's
-    /// `<style>` elements that apply to print.
-    pub fn for_document(doc: &Document) -> Self {
+    /// `<style>` elements and `<link rel=stylesheet>`s that apply to print,
+    /// in document order. Linked and `@import`ed stylesheets load through
+    /// `fetcher`, which records those that fail.
+    pub fn for_document(doc: &Document, fetcher: &Fetcher<'_>) -> Self {
         let mut stylist = Self::new();
+        stylist.add_document(doc, fetcher);
+        stylist
+    }
+
+    /// Adds the stylesheets of `doc`, as [`Stylist::for_document`] does.
+    pub fn add_document(&mut self, doc: &Document, fetcher: &Fetcher<'_>) {
         for node in doc.descendants(doc.root()) {
             let Some(element) = doc.element(node) else {
                 continue;
@@ -84,20 +104,92 @@ impl Stylist {
                 .attr("type")
                 .is_none_or(|t| t.trim().is_empty() || t.trim().eq_ignore_ascii_case("text/css"));
             let applies = element.attr("media").is_none_or(media_matches);
-            if element.name == "style" && is_css && applies {
-                stylist.add_stylesheet(&doc.text_content(node));
+            if !is_css || !applies {
+                continue;
+            }
+            match element.name.as_str() {
+                "style" => self.add_author_stylesheet(&doc.text_content(node), None, fetcher),
+                "link" if is_stylesheet_link(element.attr("rel")) => {
+                    if let Some(href) = element.attr("href") {
+                        self.link(Origin::Author, href, None, fetcher, &mut Vec::new());
+                    }
+                }
+                _ => {}
             }
         }
-        stylist
     }
 
-    /// Adds an author stylesheet, after any added earlier.
-    pub fn add_stylesheet(&mut self, css: &str) {
-        self.add(Origin::Author, Stylesheet::parse(css));
+    /// Adds an author stylesheet, after any added earlier. `base` is its
+    /// URL, for the URLs inside it, or `None` if it is part of the
+    /// document.
+    pub fn add_author_stylesheet(&mut self, css: &str, base: Option<Url>, fetcher: &Fetcher<'_>) {
+        let sheet = Stylesheet::parse(css);
+        self.add_with_imports(Origin::Author, sheet, base, fetcher, &mut Vec::new());
     }
 
-    fn add(&mut self, origin: Origin, sheet: Stylesheet) {
+    /// Adds a user stylesheet (wkhtmltopdf's `--user-style-sheet`), which
+    /// author styles override unless it says `!important`.
+    pub fn add_user_stylesheet(&mut self, css: &str, base: Option<Url>, fetcher: &Fetcher<'_>) {
+        let sheet = Stylesheet::parse(css);
+        self.add_with_imports(Origin::User, sheet, base, fetcher, &mut Vec::new());
+    }
+
+    /// The `@font-face` rules of every stylesheet, in cascade order.
+    pub fn font_faces(&self) -> &[FontFace] {
+        &self.font_faces
+    }
+
+    /// Loads and adds the stylesheet at `href`, relative to `base`.
+    /// `chain` holds the URLs of the stylesheets importing it, to stop
+    /// import cycles.
+    fn link(
+        &mut self,
+        origin: Origin,
+        href: &str,
+        base: Option<&Url>,
+        fetcher: &Fetcher<'_>,
+        chain: &mut Vec<Url>,
+    ) {
+        let url = fetcher.resolve(href, base).ok();
+        if chain.len() >= MAX_IMPORT_DEPTH || url.as_ref().is_some_and(|url| chain.contains(url)) {
+            return;
+        }
+        let Some(bytes) = fetcher.fetch(href, base) else {
+            return;
+        };
+        let css = decode_css(&bytes);
+        let sheet = Stylesheet::parse(&css);
+        self.add_with_imports(origin, sheet, url, fetcher, chain);
+    }
+
+    /// Adds `sheet` after the stylesheets it imports.
+    fn add_with_imports(
+        &mut self,
+        origin: Origin,
+        mut sheet: Stylesheet,
+        base: Option<Url>,
+        fetcher: &Fetcher<'_>,
+        chain: &mut Vec<Url>,
+    ) {
+        let imports = std::mem::take(&mut sheet.imports);
+        if !imports.is_empty() {
+            chain.extend(base.clone());
+            for import in imports.iter().filter(|import| import.applies) {
+                self.link(origin, &import.url, base.as_ref(), fetcher, chain);
+            }
+            if base.is_some() {
+                chain.pop();
+            }
+        }
+        for face in &mut sheet.font_faces {
+            face.base.clone_from(&base);
+        }
+        self.add(origin, sheet);
+    }
+
+    fn add(&mut self, origin: Origin, mut sheet: Stylesheet) {
         self.page.merge(&sheet.page);
+        self.font_faces.append(&mut sheet.font_faces);
         for rule in sheet.rules {
             let block = self.blocks.len();
             self.blocks.push(rule.declarations);
@@ -161,6 +253,8 @@ impl Stylist {
                 let level = match (rule.origin, declaration.important) {
                     (Origin::UserAgent, false) => Level::UserAgent,
                     (Origin::UserAgent, true) => Level::UserAgentImportant,
+                    (Origin::User, false) => Level::User,
+                    (Origin::User, true) => Level::UserImportant,
                     (Origin::Author, false) => Level::Author,
                     (Origin::Author, true) => Level::AuthorImportant,
                 };
@@ -205,6 +299,21 @@ impl Stylist {
     }
 }
 
+/// Whether a `rel` attribute names a stylesheet that applies by default
+/// (not an alternate one).
+fn is_stylesheet_link(rel: Option<&str>) -> bool {
+    let tokens: Vec<&str> = rel.unwrap_or_default().split_ascii_whitespace().collect();
+    tokens.iter().any(|t| t.eq_ignore_ascii_case("stylesheet"))
+        && !tokens.iter().any(|t| t.eq_ignore_ascii_case("alternate"))
+}
+
+/// Stylesheet bytes as text: UTF-8, without a byte order mark. Invalid
+/// sequences become U+FFFD.
+fn decode_css(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,8 +323,12 @@ mod tests {
 
     /// The computed style of the first `target` element in `html`.
     fn style_of(html: &str, target: &str) -> ComputedStyle {
+        styled(html, target, &Fetcher::data_only())
+    }
+
+    fn styled(html: &str, target: &str, fetcher: &Fetcher<'_>) -> ComputedStyle {
         let doc = parse_html(html.as_bytes());
-        let stylist = Stylist::for_document(&doc);
+        let stylist = Stylist::for_document(&doc, fetcher);
         let node = doc.find_element(target).expect("target exists");
 
         let mut chain = vec![node];
@@ -332,6 +445,137 @@ mod tests {
     #[test]
     fn page_rule_is_collected() {
         let doc = parse_html(b"<style>@page { margin: 1in }</style>");
-        assert_eq!(Stylist::for_document(&doc).page().margin.top, Some(72.0));
+        assert_eq!(
+            Stylist::for_document(&doc, &Fetcher::data_only())
+                .page()
+                .margin
+                .top,
+            Some(72.0)
+        );
+    }
+
+    /// Serves stylesheets from a list of `(url, css)`.
+    struct Files(Vec<(&'static str, &'static str)>);
+
+    impl presswork_dom::resource::Loader for Files {
+        fn load(&self, url: &Url) -> Result<Vec<u8>, presswork_dom::resource::LoadError> {
+            self.0
+                .iter()
+                .find(|(path, _)| *path == url.as_str())
+                .map(|(_, css)| css.as_bytes().to_vec())
+                .ok_or_else(|| presswork_dom::resource::LoadError::Failed("not found".into()))
+        }
+    }
+
+    fn site(files: Vec<(&'static str, &'static str)>) -> Files {
+        Files(files)
+    }
+
+    fn base() -> Option<Url> {
+        Url::parse("file:///site/invoice.html").ok()
+    }
+
+    #[test]
+    fn linked_and_imported_stylesheets_apply_in_document_order() {
+        let files = site(vec![
+            (
+                "file:///site/css/main.css",
+                "@import 'base.css'; p { color: red }",
+            ),
+            (
+                "file:///site/css/base.css",
+                "p { color: blue; text-align: center }",
+            ),
+        ]);
+        let fetcher = Fetcher::new(&files, base());
+        let html = "<link rel=stylesheet href=css/main.css><p>x";
+        let style = styled(html, "p", &fetcher);
+        // The imported sheet comes first, so main.css wins the color.
+        assert_eq!(style.color, RED);
+        assert_eq!(style.text_align, TextAlign::Center);
+        assert!(fetcher.failures().is_empty());
+
+        // A later <style> wins over the linked sheet.
+        let html = "<link rel='Stylesheet' href=css/main.css><style>p { color: blue }</style><p>x";
+        assert_eq!(styled(html, "p", &fetcher).color, BLUE);
+    }
+
+    #[test]
+    fn skips_alternate_and_non_print_links_and_reports_missing_ones() {
+        let files = site(vec![("file:///site/a.css", "p { color: red }")]);
+        let fetcher = Fetcher::new(&files, base());
+        for html in [
+            "<link rel='alternate stylesheet' href=a.css><p>x",
+            "<link rel=stylesheet media=screen href=a.css><p>x",
+            "<link rel=icon href=a.css><p>x",
+        ] {
+            assert_eq!(styled(html, "p", &fetcher).color, Color::BLACK, "{html}");
+        }
+        styled("<link rel=stylesheet href=missing.css><p>x", "p", &fetcher);
+        let failures = fetcher.failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].url, "missing.css");
+    }
+
+    #[test]
+    fn import_cycles_stop() {
+        let files = site(vec![
+            ("file:///site/a.css", "@import 'b.css'; p { color: red }"),
+            (
+                "file:///site/b.css",
+                "@import 'a.css'; p { text-align: right }",
+            ),
+        ]);
+        let fetcher = Fetcher::new(&files, base());
+        let style = styled("<link rel=stylesheet href=a.css><p>x", "p", &fetcher);
+        assert_eq!(style.color, RED);
+        assert_eq!(style.text_align, TextAlign::Right);
+    }
+
+    #[test]
+    fn font_faces_resolve_against_their_stylesheet() {
+        let files = site(vec![(
+            "file:///site/css/fonts.css",
+            "@font-face { font-family: Brand; src: url(../fonts/brand.ttf) }",
+        )]);
+        let fetcher = Fetcher::new(&files, base());
+        let doc = parse_html(
+            b"<link rel=stylesheet href=css/fonts.css>\
+              <style>@font-face { font-family: Inline; src: url(x.ttf) }</style>",
+        );
+        let stylist = Stylist::for_document(&doc, &fetcher);
+        let faces = stylist.font_faces();
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0].family, "Brand");
+        let base = faces[0].base.as_ref().unwrap();
+        assert_eq!(
+            fetcher
+                .resolve("../fonts/brand.ttf", Some(base))
+                .unwrap()
+                .as_str(),
+            "file:///site/fonts/brand.ttf"
+        );
+        assert_eq!(faces[1].base, None);
+    }
+
+    #[test]
+    fn user_styles_lose_to_author_styles_unless_important() {
+        let doc = parse_html(b"<style>p { color: red; text-align: right }</style><p>x");
+        let fetcher = Fetcher::data_only();
+        let mut stylist = Stylist::for_document(&doc, &fetcher);
+        stylist.add_user_stylesheet(
+            "p { color: blue; text-align: center !important; font-size: 20pt }",
+            None,
+            &fetcher,
+        );
+        let p = doc.find_element("p").unwrap();
+        let body = doc.find_element("body").unwrap();
+        let html = doc.document_element().unwrap();
+        let root = stylist.style(&doc, html, None);
+        let body = stylist.style(&doc, body, Some(&root));
+        let style = stylist.style(&doc, p, Some(&body));
+        assert_eq!(style.color, RED);
+        assert_eq!(style.text_align, TextAlign::Center);
+        assert_eq!(style.font_size, 20.0);
     }
 }

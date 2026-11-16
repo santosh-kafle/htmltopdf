@@ -10,10 +10,11 @@ use parley::{
 };
 use presswork_dom::{Document, NodeId};
 use presswork_style::{
-    Color, ComputedStyle, LineHeight, ListStyleType, TextAlign, VerticalAlign, WhiteSpace,
+    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, TextAlign, VerticalAlign,
+    WhiteSpace,
 };
 
-use super::{Context, Flow, GenericFonts};
+use super::{Context, Flow, GenericFonts, WebFonts};
 use crate::fragment::{Glyph, Item, TextRun};
 use crate::geometry::Point;
 
@@ -154,6 +155,7 @@ impl Inline {
 /// The parley style properties for text with the given computed style.
 fn text_properties<'a>(
     generics: &'a GenericFonts,
+    web: &'a WebFonts<'_>,
     style: &'a ComputedStyle,
 ) -> [StyleProperty<'a, Ink>; 8] {
     let language = style.lang.as_deref().and_then(|l| Language::parse(l).ok());
@@ -171,7 +173,7 @@ fn text_properties<'a>(
         TextWrapMode::NoWrap
     };
     [
-        StyleProperty::FontFamily(generics.stack(&style.font_family)),
+        StyleProperty::FontFamily(generics.stack(web, &style.font_family)),
         StyleProperty::FontSize(style.font_size),
         StyleProperty::FontWeight(FontWeight::new(style.font_weight)),
         StyleProperty::FontStyle(if style.italic {
@@ -196,12 +198,21 @@ impl Context<'_> {
         spans: &[(Range<usize>, ComputedStyle)],
         boxes: &[InlineObject],
     ) -> Layout<Ink> {
+        let styles = std::iter::once(style).chain(spans.iter().map(|(_, span)| span));
+        for style in styles {
+            for family in style.font_family.iter() {
+                if let FontFamilyName::Named(name) = family {
+                    self.web_fonts.load(name, self.fonts, self.fetcher);
+                }
+            }
+        }
+
         let mut builder = self.texts.ranged_builder(self.fonts, text, 1.0, false);
-        for property in text_properties(self.generics, style) {
+        for property in text_properties(self.generics, &self.web_fonts, style) {
             builder.push_default(property);
         }
         for (range, span) in spans {
-            for property in text_properties(self.generics, span) {
+            for property in text_properties(self.generics, &self.web_fonts, span) {
                 builder.push(property, range.clone());
             }
         }

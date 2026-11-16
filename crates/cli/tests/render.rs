@@ -128,3 +128,93 @@ fn reports_network_images_even_when_quiet() {
     let out = presswork(&["--quiet", "--strict", "-", "-"], html);
     assert!(!out.status.success());
 }
+
+/// Whether the PDF's pages are A5 (420 by 595 points) rather than A4.
+fn is_a5(pdf: &[u8]) -> bool {
+    String::from_utf8_lossy(pdf).contains("/MediaBox[0 0 419.5")
+}
+
+/// A document linking `css/print.css`, which makes the pages A5.
+struct Site(std::path::PathBuf);
+
+impl Site {
+    fn new(name: &str, html: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("presswork-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("css")).unwrap();
+        std::fs::write(
+            dir.join("css/print.css"),
+            "@import 'page.css'; p { color: #333 }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("css/page.css"), "@page { size: A5 }").unwrap();
+        std::fs::write(dir.join("invoice.html"), html).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self, file: &str) -> String {
+        self.0.join(file).to_str().unwrap().to_owned()
+    }
+}
+
+impl Drop for Site {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn linked_stylesheets_load_under_the_file_rules() {
+    let site = Site::new(
+        "link",
+        "<link rel=stylesheet href='css/print.css'><p>Invoice</p>",
+    );
+    let input = site.path("invoice.html");
+
+    let out = presswork(&[&input, "-"], b"");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!is_a5(&out.stdout));
+    assert!(stderr.contains("css/print.css"), "{stderr}");
+
+    // Allowing the directory loads the stylesheet and what it imports.
+    let out = presswork(&["--allow", &site.path("css"), &input, "-"], b"");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && stderr.is_empty(), "{stderr}");
+    assert!(is_a5(&out.stdout));
+}
+
+#[test]
+fn user_style_sheet_applies_below_the_document_styles() {
+    let site = Site::new("user", "<p>Invoice</p>");
+    let input = site.path("invoice.html");
+    let sheet = site.path("css/page.css");
+
+    // The operator's stylesheet is read even with local file access off.
+    let out = presswork(&["--user-style-sheet", &sheet, &input, "-"], b"");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(is_a5(&out.stdout));
+
+    // The document's own @page wins.
+    std::fs::write(
+        site.0.join("invoice.html"),
+        "<style>@page { size: A4 }</style><p>Invoice</p>",
+    )
+    .unwrap();
+    let out = presswork(&["--user-style-sheet", &sheet, &input, "-"], b"");
+    assert!(!is_a5(&out.stdout));
+
+    let out = presswork(&["--user-style-sheet", "missing.css", &input, "-"], b"");
+    assert!(!out.status.success());
+}
+
+#[test]
+fn no_images_skips_images_without_warnings() {
+    let html = b"<img src='missing.png' alt='Logo'><p>Invoice</p>";
+    let out = presswork(&["--no-images", "-", "-"], html);
+    assert!(out.status.success() && out.stderr.is_empty());
+    assert!(!has_image(&out.stdout));
+}

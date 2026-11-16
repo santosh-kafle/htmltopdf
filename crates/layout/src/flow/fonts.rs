@@ -5,6 +5,8 @@ use std::borrow::Cow;
 use parley::{FontContext, FontFamily as FamilyStack, FontFamilyName as StackName};
 use presswork_style::{FontFamilyName, GenericFamily};
 
+use super::WebFonts;
+
 /// The font each generic family resolves to.
 ///
 /// fontconfig maps a generic family such as `serif` to a long list of fonts
@@ -38,12 +40,17 @@ impl GenericFonts {
         self.serif.is_some() || self.sans_serif.is_some() || self.monospace.is_some()
     }
 
-    /// The parley font stack for a computed `font-family` list.
-    pub fn stack<'a>(&'a self, families: &'a [FontFamilyName]) -> FamilyStack<'a> {
+    /// The parley font stack for a computed `font-family` list, with
+    /// `@font-face` families mapped to their registered names.
+    pub fn stack<'a>(
+        &'a self,
+        web: &'a WebFonts<'_>,
+        families: &'a [FontFamilyName],
+    ) -> FamilyStack<'a> {
         let names = families
             .iter()
             .map(|family| match family {
-                FontFamilyName::Named(name) => StackName::named(name),
+                FontFamilyName::Named(name) => StackName::named(web.name(name)),
                 FontFamilyName::Generic(generic) => self.generic(*generic),
             })
             .collect();

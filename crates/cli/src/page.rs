@@ -104,6 +104,7 @@ impl PageArgs {
                 bottom: margin(self.margin_bottom, Side::Bottom),
                 left: margin(self.margin_left, Side::Left),
             },
+            ..LayoutOptions::default()
         }
     }
 }
@@ -140,7 +141,7 @@ mod tests {
 
     fn page_rule(css: &str) -> PageRule {
         let mut styles = Stylist::new();
-        styles.add_stylesheet(css);
+        styles.add_author_stylesheet(css, None, &presswork_layout::Fetcher::data_only());
         styles.page().clone()
     }
 

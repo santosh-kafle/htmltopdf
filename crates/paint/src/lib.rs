@@ -271,15 +271,16 @@ impl FontCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use presswork_layout::{DataUrls, Engine, LayoutOptions};
+    use presswork_layout::{Engine, Fetcher, LayoutOptions};
     use presswork_style::Stylist;
 
     fn pages(html: &str) -> Vec<Page> {
         let doc = presswork_dom::parse_html(html.as_bytes());
-        let styles = Stylist::for_document(&doc);
-        let output = Engine::new().layout(&doc, &styles, &LayoutOptions::default(), &DataUrls);
-        assert_eq!(output.failures, []);
-        output.pages
+        let fetcher = Fetcher::data_only();
+        let styles = Stylist::for_document(&doc, &fetcher);
+        let pages = Engine::new().layout(&doc, &styles, &LayoutOptions::default(), &fetcher);
+        assert_eq!(fetcher.failures(), []);
+        pages
     }
 
     fn contains(pdf: &[u8], needle: &[u8]) -> bool {

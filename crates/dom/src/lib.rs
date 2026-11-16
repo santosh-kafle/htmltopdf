@@ -6,7 +6,7 @@
 //!
 //! [`parse_html`] builds a document from HTML using `html5ever`. The
 //! [`resource`] module defines how the resources a document refers to
-//! (images) are loaded.
+//! (images, stylesheets, fonts) are loaded.
 
 mod parse;
 pub mod resource;

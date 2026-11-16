@@ -5,9 +5,10 @@
 //! - [`selector`] matches selectors against `presswork_dom` documents with
 //!   the `selectors` crate.
 //! - [`cascade`] collects the declarations that apply to an element (from
-//!   the built-in user-agent stylesheet, presentational attributes, author
-//!   stylesheets and `style=""`), orders them by origin, importance,
-//!   specificity and source order, and produces a [`ComputedStyle`].
+//!   the built-in user-agent stylesheet, a user stylesheet, presentational
+//!   attributes, author stylesheets (loading `<link>` and `@import`ed ones)
+//!   and `style=""`), orders them by origin, importance, specificity and
+//!   source order, and produces a [`ComputedStyle`].
 //!
 //! Start with [`Stylist::for_document`], then call [`Stylist::style`] for
 //! each element, top down.
