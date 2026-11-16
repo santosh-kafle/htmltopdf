@@ -751,3 +751,27 @@ fn no_images_shows_alt_text_without_failures() {
     assert_eq!(words(&pages[0]), ["Logo"]);
     assert_eq!(failures, []);
 }
+
+/// The text each glyph of `run` maps back to.
+fn glyph_texts(run: &TextRun) -> Vec<&str> {
+    run.glyphs
+        .iter()
+        .map(|g| &run.text[g.text_range.clone()])
+        .collect()
+}
+
+#[test]
+fn plain_clusters_map_one_character_per_glyph() {
+    let pages = layout("<p lang=ne>कृष्ण किताब</p>");
+    let texts = glyph_texts(run_with(&pages[0], "कृ"));
+    // कृ is the consonant and the vowel sign below it, each its own
+    // glyph, so each maps to its own character.
+    assert_eq!(texts[..2], ["क", "\u{943}"]);
+    // The conjunct ष्ण is substituted glyphs: they keep the cluster.
+    assert!(texts.contains(&"ष\u{94d}ण"), "{texts:?}");
+    // ि is drawn before its consonant: both keep the cluster, so the
+    // text comes out in reading order.
+    let texts = glyph_texts(run_with(&pages[0], "किताब"));
+    let ki: Vec<&str> = texts.into_iter().filter(|t| t.contains('ि')).collect();
+    assert!(ki.len() >= 2 && ki.iter().all(|t| *t == "कि"), "{ki:?}");
+}

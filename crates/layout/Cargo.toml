@@ -12,6 +12,7 @@ presswork-dom.workspace = true
 presswork-style.workspace = true
 parley.workspace = true
 imagesize.workspace = true
+read-fonts.workspace = true
 miniz_oxide.workspace = true
 # Also enables fontique's `fontconfig-dlopen` feature for parley (see the
 # workspace Cargo.toml).

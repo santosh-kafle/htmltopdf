@@ -218,3 +218,34 @@ fn no_images_skips_images_without_warnings() {
     assert!(out.status.success() && out.stderr.is_empty());
     assert!(!has_image(&out.stdout));
 }
+
+/// The text `pdftotext` extracts from `pdf`, or `None` if it is not
+/// installed (CI installs it).
+fn extract_text(pdf: &[u8]) -> Option<String> {
+    let mut child = Command::new("pdftotext")
+        .args(["-q", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take().unwrap().write_all(pdf).unwrap();
+    let out = child.wait_with_output().unwrap();
+    Some(String::from_utf8(out.stdout).unwrap().trim().to_owned())
+}
+
+/// Copying Devanagari out of the PDF gives back the same text: conjuncts,
+/// reordered vowel signs and marks below, with no spaces inside words.
+#[test]
+fn devanagari_text_extracts_unchanged() {
+    let text = "क्षत्रिय विद्यालय, श्रीमती कृष्ण प्रसाद। प्रकृति हृदय मृत्यु कुर्सी २०८१";
+    let out = presswork(
+        &["-q", "-", "-"],
+        format!("<p lang=ne>{text}</p>").as_bytes(),
+    );
+    assert!(out.status.success());
+    let Some(extracted) = extract_text(&out.stdout) else {
+        eprintln!("skipped: pdftotext is not installed");
+        return;
+    };
+    assert_eq!(extracted, text);
+}

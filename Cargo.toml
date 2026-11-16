@@ -29,6 +29,7 @@ parley = "0.13"
 # fontconfig headers, and the binary starts without fontconfig installed.
 fontique = { version = "0.13", features = ["fontconfig-dlopen"] }
 krilla = "0.8"
+read-fonts = "0.46"
 url = "2.5"
 data-url = "0.3"
 miniz_oxide = "0.9"

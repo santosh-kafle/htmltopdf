@@ -13,9 +13,10 @@ use presswork_style::{
     Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, TextAlign, VerticalAlign,
     WhiteSpace,
 };
+use read_fonts::{FontRef, TableProvider};
 
 use super::{Context, Flow, GenericFonts, WebFonts};
-use crate::fragment::{Glyph, Item, TextRun};
+use crate::fragment::{FontData, Glyph, Item, TextRun};
 use crate::geometry::Point;
 
 /// The text color, as parley's per-span "brush".
@@ -498,6 +499,7 @@ fn text_run(
             .collect();
     }
 
+    split_plain_clusters(&mut glyphs, text, shaped.font());
     TextRun {
         font: shaped.font().clone(),
         font_size: shaped.font_size(),
@@ -505,6 +507,57 @@ fn text_run(
         origin,
         glyphs,
         text: Arc::clone(text),
+    }
+}
+
+/// Gives each glyph of a cluster its own character when the cluster is
+/// just its characters' default glyphs, in order: a consonant and the vowel
+/// sign under it (कृ), a letter and a combining accent.
+///
+/// parley maps every glyph of a cluster to the whole cluster, which a PDF
+/// can only express with `/ActualText`. Text extraction (poppler, at least)
+/// then takes the cluster to end where its last glyph ends, and a final
+/// mark shifted left reads as a gap: "कृष्ण" was extracted as "कृ ष्ण".
+/// Mapped one character per glyph, no `/ActualText` is needed.
+///
+/// Clusters with substituted glyphs (conjuncts such as ष्ण) or reordered
+/// ones (ि, drawn before its consonant) keep the whole-cluster mapping,
+/// the only correct one for them.
+fn split_plain_clusters(glyphs: &mut [Glyph], text: &str, font: &FontData) {
+    // Parsed on first need: most clusters are a single glyph.
+    let mut font_ref = None;
+    let mut start = 0;
+    while start < glyphs.len() {
+        let range = glyphs[start].text_range.clone();
+        let len = glyphs[start..]
+            .iter()
+            .take_while(|g| g.text_range == range)
+            .count();
+        let cluster = &mut glyphs[start..start + len];
+        start += len;
+
+        let chars = &text[range.clone()];
+        if len < 2 || chars.chars().count() != len {
+            continue;
+        }
+        let font_ref = font_ref.get_or_insert_with(|| {
+            FontRef::from_index(font.data.data(), font.index)
+                .ok()
+                .and_then(|font| font.cmap().ok())
+        });
+        let Some(cmap) = font_ref else {
+            return;
+        };
+        let plain = chars.chars().zip(cluster.iter()).all(|(ch, glyph)| {
+            cmap.map_codepoint(ch)
+                .is_some_and(|id| id.to_u32() == glyph.id)
+        });
+        if plain {
+            for ((offset, ch), glyph) in chars.char_indices().zip(cluster.iter_mut()) {
+                let char_start = range.start + offset;
+                glyph.text_range = char_start..char_start + ch.len_utf8();
+            }
+        }
     }
 }
 

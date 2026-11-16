@@ -1080,6 +1080,7 @@ dependencies = [
  "parley",
  "presswork-dom",
  "presswork-style",
+ "read-fonts 0.46.0",
 ]
 
 [[package]]
