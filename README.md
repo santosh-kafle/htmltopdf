@@ -61,7 +61,7 @@ maintained, and accepts the same command line.
   - Options that are not implemented yet are ignored with a warning.
     Options unknown to wkhtmltopdf are rejected, as wkhtmltopdf does.
   - `-q` / `--quiet` and `--log-level none` silence warnings, except for
-    ignored options that change the output, such as headers, footers and
+    ignored options that change the output, such as HTML headers and
     zoom. Those are always reported, because `pdfkit` passes `--quiet` by
     default.
   - `--strict`, or `PRESSWORK_STRICT=1` in the environment, makes those
@@ -78,11 +78,23 @@ maintained, and accepts the same command line.
   `--user-style-sheet`, which the document's own styles override unless it
   uses `!important`. The user stylesheet is read whatever the file access
   options say, since whoever runs presswork named it.
+- **Text headers and footers.** `--header-left`, `--header-center`,
+  `--header-right`, the `--footer-*` equivalents, `--header-font-name`,
+  `--header-font-size`, `--header-line`, `--header-spacing` (and their
+  footer versions), `--default-header`, `--page-offset` and `--replace`.
+  Placement matches wkhtmltopdf: the text sits in the page margin just
+  outside the content, so give it room with `--margin-top` or
+  `--margin-bottom`. These variables are replaced: `[page]`, `[topage]`,
+  `[frompage]`, `[sitepage]`, `[sitepages]`, `[title]`, `[doctitle]`,
+  `[webpage]`, `[date]`, `[isodate]` and `[time]`, plus any set with
+  `--replace`. The text can be in any script, for example
+  `--footer-center "पृष्ठ [page] / [topage]"`.
 
 Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
 floats and positioning, flexbox and grid, generated content (`::before`), text
 decoration, `height`, row-spanning cells (they occupy their first row only),
-and the wkhtmltopdf header, footer and table-of-contents options.
+HTML headers and footers (`--header-html`, `--footer-html`), the
+`[section]` header variables (always empty), and the table of contents.
 
 ## Usage
 
@@ -114,6 +126,9 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
   installed (presswork warns if it finds none).
 - **One input document.** Multiple inputs, cover pages and `toc` objects are
   not supported yet.
+- **Header dates.** `[date]` and `[time]` always use wkhtmltopdf's format
+  for the C locale (`17 Nov 2026`, `20:06:55`), the usual one on servers.
+  wkhtmltopdf follows `LANG`, so it may write `11/17/26` instead.
 
 ## Building
 

@@ -18,6 +18,8 @@ presswork-paint = { path = "crates/paint" }
 
 # External crates
 anyhow = "1"
+# Local time for the [date] and [time] header variables.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 regex = "1"
 html5ever = "0.40"

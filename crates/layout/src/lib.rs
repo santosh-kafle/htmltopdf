@@ -8,6 +8,8 @@
 //!    from `parley`.
 //! 2. **Fragmentation** ([`paginate`]): cut the canvas into pages between
 //!    lines and table rows.
+//! 3. **Margin text** ([`Engine::draw_band`]): headers and footers, drawn
+//!    on each page once the page count is known.
 //!
 //! The output is a list of positioned items per page, consumed by
 //! `presswork-paint`. All geometry is expressed in typographic points
@@ -20,6 +22,7 @@
 mod flow;
 pub mod fragment;
 pub mod geometry;
+mod margin;
 pub mod page;
 mod paginate;
 
@@ -35,6 +38,7 @@ pub use fragment::{
     Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Page, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
+pub use margin::{Band, BandStyle, BandText};
 pub use page::{Orientation, PageSize};
 
 /// Page geometry for a layout.

@@ -1,4 +1,5 @@
 mod compat;
+mod headers;
 mod loader;
 mod page;
 
@@ -14,6 +15,7 @@ use presswork_paint::PdfOptions;
 use presswork_style::Stylist;
 use url::Url;
 
+use headers::{DocumentInfo, HeaderArgs};
 use loader::ResourceArgs;
 use page::PageArgs;
 
@@ -35,6 +37,9 @@ struct Cli {
     #[command(flatten)]
     resources: ResourceArgs,
 
+    #[command(flatten)]
+    headers: HeaderArgs,
+
     /// Document title written to the PDF metadata.
     #[arg(long)]
     title: Option<String>,
@@ -49,8 +54,8 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Fail instead of warning when an unsupported option (headers,
-    /// footers, zoom, ...) or a network resource would change the output.
+    /// Fail instead of warning when an unsupported option (HTML headers,
+    /// zoom, ...) or a network resource would change the output.
     #[arg(
         long,
         env = "PRESSWORK_STRICT",
@@ -137,6 +142,16 @@ impl Sink {
 }
 
 impl Cli {
+    /// The input as given on the command line.
+    fn input(&self) -> String {
+        let inputs = &self.paths[..self.paths.len() - 1];
+        inputs
+            .iter()
+            .map(|input| input.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn io(&self) -> Result<(Source, Sink)> {
         let (output, inputs) = self
             .paths
@@ -227,6 +242,12 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
     }
     styles.add_document(&doc, &fetcher);
     let mut layout = cli.page.layout_options(styles.page());
+    // --default-header implies a 2cm top margin, as if given with -T.
+    if cli.page.margin_top.is_none()
+        && let Some(top) = cli.headers.default_margin_top()
+    {
+        layout.margins.top = top;
+    }
     layout.images = !cli.resources.no_images;
     let mut engine = Engine::new();
     if !engine.has_system_fonts() {
@@ -236,10 +257,19 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
              install fontconfig and at least one font package"
         );
     }
-    let pages = engine.layout(&doc, &styles, &layout, &fetcher);
+    let mut pages = engine.layout(&doc, &styles, &layout, &fetcher);
+    // wkhtmltopdf uses the document's <title> unless --title is given.
+    let title = cli.title.clone().or_else(|| doc.title());
+    let info = DocumentInfo {
+        webpage: cli.input(),
+        title: doc.title().unwrap_or_default(),
+        doctitle: title.clone().unwrap_or_default(),
+        now: chrono::Local::now().naive_local(),
+    };
+    cli.headers
+        .draw(&mut engine, &mut pages, layout.margins, &info);
     let options = PdfOptions {
-        // wkhtmltopdf uses the document's <title> unless --title is given.
-        title: cli.title.clone().or_else(|| doc.title()),
+        title,
         author: None,
     };
     let pdf = presswork_paint::render_pdf(&pages, &options)?;
@@ -412,9 +442,9 @@ mod tests {
         let (cli, n) = parse(&["--strict", "--outline", "a", "b"]).unwrap();
         assert!(cli.check_ignored(&n).is_ok());
 
-        let (cli, n) = parse(&["--strict", "--footer-right", "[page]", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["--strict", "--footer-html", "f.html", "a", "b"]).unwrap();
         let err = cli.check_ignored(&n).unwrap_err().to_string();
-        assert!(err.contains("--footer-right"), "{err}");
+        assert!(err.contains("--footer-html"), "{err}");
     }
 
     #[test]

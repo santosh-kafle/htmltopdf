@@ -25,8 +25,8 @@ fn renders_stdin_to_stdout_like_pdfkit() {
             "Letter",
             "--margin-top",
             "0.75in",
-            "--footer-right",
-            "[page]",
+            "--zoom",
+            "1.5",
             "-",
             "-",
         ],
@@ -37,7 +37,7 @@ fn renders_stdin_to_stdout_like_pdfkit() {
     assert!(out.stdout.starts_with(b"%PDF-"));
     // Options that change the output are reported even under --quiet;
     // supported ones are not.
-    assert!(stderr.contains("--footer-right"), "{stderr}");
+    assert!(stderr.contains("--zoom"), "{stderr}");
     assert!(!stderr.contains("--margin-top"), "{stderr}");
 }
 
@@ -248,4 +248,38 @@ fn devanagari_text_extracts_unchanged() {
         return;
     };
     assert_eq!(extracted, text);
+}
+
+/// wkhtmltopdf's text footers, numbering pages, in Nepali as in an invoice.
+#[test]
+fn footers_number_the_pages() {
+    let html = "<title>बिल</title><p>एक</p><p style=\"break-before: page\">दुई</p>";
+    let out = presswork(
+        &[
+            "-q",
+            "--footer-center",
+            "पृष्ठ [page] / [topage]",
+            "--footer-right",
+            "[title]",
+            "--footer-line",
+            "--margin-bottom",
+            "20mm",
+            "-",
+            "-",
+        ],
+        html.as_bytes(),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let Some(text) = extract_text(&out.stdout) else {
+        eprintln!("skipped: pdftotext is not installed");
+        return;
+    };
+    let pages: Vec<&str> = text.split('\u{c}').map(str::trim).collect();
+    assert_eq!(pages.len(), 2, "{text:?}");
+    for (index, page) in pages.iter().enumerate() {
+        assert!(page.contains(&format!("पृष्ठ {} / 2", index + 1)), "{page:?}");
+        assert!(page.contains("बिल"), "{page:?}");
+    }
 }

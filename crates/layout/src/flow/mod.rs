@@ -246,6 +246,21 @@ impl Context<'_> {
     }
 }
 
+/// Lays out `text` on its own as a paragraph in `style`, `width` wide, for
+/// text that is not part of the document, such as a page header.
+pub(crate) fn text_block(
+    cx: &mut Context<'_>,
+    text: &str,
+    style: &ComputedStyle,
+    width: f32,
+) -> Canvas {
+    let mut flow = Flow::new(cx);
+    let mut inline = Inline::default();
+    inline.push_text(text, style);
+    flow.paragraph(inline, style, 0.0, width);
+    flow.finish().0
+}
+
 /// What a [`Flow`] produces.
 enum Mode {
     /// Positioned content.

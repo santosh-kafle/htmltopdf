@@ -29,8 +29,8 @@ enum Kind {
     /// anyway (fetching, links, outline); dropped with a warning that
     /// `--quiet` silences, along with its values.
     Ignore(usize),
-    /// Not implemented yet and changes what ends up on the page (margins,
-    /// headers, footers, zoom, ...); dropped with a warning that
+    /// Not implemented yet and changes what ends up on the page (HTML
+    /// headers and footers, zoom, ...); dropped with a warning that
     /// `--quiet` does not silence, or an error in strict mode.
     Lossy(usize),
 }
@@ -105,7 +105,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("custom-header-propagation", None, Ignore(0)),
     ("no-custom-header-propagation", None, Ignore(0)),
     ("debug-javascript", None, Ignore(0)),
-    ("default-header", None, Lossy(0)),
+    ("default-header", None, Pass(0)),
     ("encoding", None, Lossy(1)),
     ("disable-external-links", None, Ignore(0)),
     ("enable-external-links", None, Ignore(0)),
@@ -120,7 +120,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("minimum-font-size", None, Lossy(1)),
     ("exclude-from-outline", None, Ignore(0)),
     ("include-in-outline", None, Ignore(0)),
-    ("page-offset", None, Lossy(1)),
+    ("page-offset", None, Pass(1)),
     ("password", None, Ignore(1)),
     ("enable-plugins", None, Ignore(0)),
     ("post", None, Ignore(2)),
@@ -143,25 +143,25 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("window-status", None, Lossy(1)),
     ("zoom", None, Lossy(1)),
     // Header and footer options.
-    ("footer-center", None, Lossy(1)),
-    ("footer-font-name", None, Lossy(1)),
-    ("footer-font-size", None, Lossy(1)),
+    ("footer-center", None, Pass(1)),
+    ("footer-font-name", None, Pass(1)),
+    ("footer-font-size", None, Pass(1)),
     ("footer-html", None, Lossy(1)),
-    ("footer-left", None, Lossy(1)),
-    ("footer-line", None, Lossy(0)),
-    ("no-footer-line", None, Lossy(0)),
-    ("footer-right", None, Lossy(1)),
-    ("footer-spacing", None, Lossy(1)),
-    ("header-center", None, Lossy(1)),
-    ("header-font-name", None, Lossy(1)),
-    ("header-font-size", None, Lossy(1)),
+    ("footer-left", None, Pass(1)),
+    ("footer-line", None, Pass(0)),
+    ("no-footer-line", None, Pass(0)),
+    ("footer-right", None, Pass(1)),
+    ("footer-spacing", None, Pass(1)),
+    ("header-center", None, Pass(1)),
+    ("header-font-name", None, Pass(1)),
+    ("header-font-size", None, Pass(1)),
     ("header-html", None, Lossy(1)),
-    ("header-left", None, Lossy(1)),
-    ("header-line", None, Lossy(0)),
-    ("no-header-line", None, Lossy(0)),
-    ("header-right", None, Lossy(1)),
-    ("header-spacing", None, Lossy(1)),
-    ("replace", None, Lossy(2)),
+    ("header-left", None, Pass(1)),
+    ("header-line", None, Pass(0)),
+    ("no-header-line", None, Pass(0)),
+    ("header-right", None, Pass(1)),
+    ("header-spacing", None, Pass(1)),
+    ("replace", None, Pass(2)),
     // wkhtmltopdf 0.9 spelled the TOC and cover objects as options. wicked_pdf
     // still sends these when it cannot detect a 0.12 binary.
     ("toc", None, Lossy(0)),
@@ -340,14 +340,14 @@ mod tests {
             "name",
             "value",
             "--outline",
-            "--footer-right",
-            "[page]",
+            "--footer-html",
+            "footer.html",
             "in.html",
             "out.pdf",
         ]);
         assert_eq!(r.args, ["in.html", "out.pdf"]);
         assert_eq!(r.ignored, ["--cookie", "--outline"]);
-        assert_eq!(r.lossy, ["--zoom", "-d", "--footer-right"]);
+        assert_eq!(r.lossy, ["--zoom", "-d", "--footer-html"]);
     }
 
     #[test]

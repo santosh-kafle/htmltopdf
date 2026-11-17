@@ -17,6 +17,7 @@ presswork-layout.workspace = true
 presswork-paint.workspace = true
 presswork-style.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 url.workspace = true
 
