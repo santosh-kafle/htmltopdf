@@ -775,3 +775,13 @@ fn plain_clusters_map_one_character_per_glyph() {
     let ki: Vec<&str> = texts.into_iter().filter(|t| t.contains('ि')).collect();
     assert!(ki.len() >= 2 && ki.iter().all(|t| *t == "कि"), "{ki:?}");
 }
+
+#[test]
+fn ligatures_map_to_all_their_characters() {
+    let pages = layout("<p style=\"font-family: sans-serif\">fixtures office</p>");
+    let run = run_with(&pages[0], "fixtures");
+    let texts = glyph_texts(run);
+    // Every character is covered, in order, whether or not the font has
+    // ligatures: an fi ligature's glyph stands for both letters.
+    assert_eq!(texts.concat(), "fixtures office", "{texts:?}");
+}

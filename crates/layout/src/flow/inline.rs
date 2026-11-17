@@ -464,22 +464,53 @@ fn text_run(
 
     let expected: Vec<_> = run.glyphs().collect();
     let mut glyphs = Vec::with_capacity(expected.len());
+    // The text range of each cluster with glyphs, and its glyphs' indices
+    // in `glyphs`.
+    let mut clusters: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    // Ligature continuations: the characters after the first of a
+    // ligature (the i of an fi ligature), which have no glyphs of their
+    // own; the ligature start has them all.
+    let mut continuations: Vec<Range<usize>> = Vec::new();
     let mut used = 0;
     for cluster in shaped.visual_clusters().skip(cursor.used) {
+        if cluster.is_ligature_continuation() {
+            used += 1;
+            continuations.push(cluster.text_range());
+            continue;
+        }
         if glyphs.len() >= expected.len() {
             break;
         }
         used += 1;
-        let range = cluster.text_range();
+        let first = glyphs.len();
         glyphs.extend(cluster.glyphs().map(|g| Glyph {
             id: g.id,
             advance: g.advance,
             x_offset: g.x,
             y_offset: g.y,
-            text_range: range.clone(),
+            text_range: 0..0,
         }));
+        clusters.push((cluster.text_range(), first..glyphs.len()));
     }
     cursor.used += used;
+    // A ligature's glyphs stand for all its characters: extend each start
+    // over the continuations that follow it in the text. In text order, so
+    // that a three-letter ligature (ffi) grows one character at a time
+    // whatever the direction.
+    continuations.sort_by_key(|range| range.start);
+    for continuation in continuations {
+        if let Some((range, _)) = clusters
+            .iter_mut()
+            .find(|(range, _)| range.end == continuation.start)
+        {
+            range.end = continuation.end;
+        }
+    }
+    for (range, indices) in clusters {
+        for glyph in &mut glyphs[indices] {
+            glyph.text_range = range.clone();
+        }
+    }
 
     let matches =
         glyphs.len() == expected.len() && glyphs.iter().zip(&expected).all(|(a, b)| a.id == b.id);
