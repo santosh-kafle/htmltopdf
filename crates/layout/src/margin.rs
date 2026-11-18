@@ -1,12 +1,18 @@
-//! Text in the page margins, as wkhtmltopdf's `--header-*` and `--footer-*`
-//! options draw it.
+//! Headers and footers in the page margins, as wkhtmltopdf draws them.
 //!
-//! wkhtmltopdf draws a header as one line of text just above the content
-//! area, with up to three parts (left, center, right) over the content
-//! width, and a footer the same way just below it. `--header-spacing` moves
-//! the text away from the content, and `--header-line` rules a line between
-//! the two. The text does not wrap, and the page margins are not enlarged
-//! to make room: callers set `--margin-top` to fit their header.
+//! Text headers (`--header-left` and friends): one line of text just above
+//! the content area, with up to three parts (left, center, right) over the
+//! content width, and footers the same way just below it.
+//! `--header-spacing` moves the text away from the content, and
+//! `--header-line` rules a line between the two. The text does not wrap,
+//! and the page margins are not enlarged to make room: callers set
+//! `--margin-top` to fit their header.
+//!
+//! HTML headers (`--header-html`): a whole document laid out at the content
+//! width, with the bottom of its `<body>` box `--header-spacing` above the
+//! content area (a footer's body box starts that far below it). Its body
+//! height is what wkhtmltopdf sizes the margin from when none is given, so
+//! the body box fills the margin exactly and its margins fall outside.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -137,6 +143,91 @@ impl Engine {
             } - first.top as f32;
             canvas.into_items(margins.left, top, &mut page.items);
         }
+    }
+}
+
+/// A document laid out to be drawn in a page margin: wkhtmltopdf's
+/// `--header-html` and `--footer-html`.
+#[derive(Debug, Clone)]
+pub struct MarginDocument {
+    /// Positioned from the top-left of the document.
+    pub items: Vec<Item>,
+    /// Top of the `<body>` element's border box, in points: its margin, or
+    /// a larger margin of its first child that collapses through it.
+    pub body_top: f32,
+    /// Height of the `<body>` element's border box, in points.
+    pub body_height: f32,
+}
+
+impl Engine {
+    /// Lays out `doc` as a header or footer `width` points wide, on one
+    /// unbroken canvas. Images and fonts load through `fetcher`.
+    pub fn layout_margin_document(
+        &mut self,
+        doc: &Document,
+        styles: &Stylist,
+        width: f32,
+        images: bool,
+        fetcher: &Fetcher<'_>,
+    ) -> MarginDocument {
+        let mut cx = flow::Context {
+            fonts: &mut self.fonts,
+            generics: &self.generics,
+            texts: &mut self.texts,
+            doc,
+            styles,
+            fetcher,
+            web_fonts: flow::WebFonts::new(styles.font_faces(), self.layouts),
+            load_images: images,
+            images: HashMap::new(),
+        };
+        self.layouts += 1;
+        let mut flow = flow::Flow::new(&mut cx);
+        if let Some(body) = doc.find_element("body") {
+            flow.track(body);
+        }
+        if let Some(root) = doc.document_element() {
+            let style = styles.style(doc, root, None);
+            flow.block(root, &style, 0.0, width.max(0.0));
+        }
+        let body = flow.tracked_box();
+        let (canvas, height) = flow.finish();
+        cx.web_fonts.unregister(cx.fonts);
+        let (body_top, body_bottom) = body.unwrap_or((0.0, height));
+        let mut items = Vec::new();
+        canvas.into_items(0.0, 0.0, &mut items);
+        MarginDocument {
+            items,
+            body_top: body_top as f32,
+            body_height: (body_bottom - body_top) as f32,
+        }
+    }
+}
+
+impl MarginDocument {
+    /// Draws the document on `page`, whose content area is inside
+    /// `margins`, over whatever is already there.
+    ///
+    /// A header's body box ends `spacing` above the content area, and a
+    /// footer's starts `spacing` below it.
+    ///
+    /// wkhtmltopdf's code moves the whole document by the body height, so
+    /// a body margin (8px by default) may push its header into the content
+    /// and its footer off the page. Placing the body box instead is the
+    /// same for documents without a body margin, and keeps the others
+    /// inside the margin they were sized for.
+    pub fn draw(&self, page: &mut Page, band: Band, spacing: f32, margins: EdgeSizes) {
+        let body = match band {
+            Band::Header => margins.top - spacing - self.body_height,
+            Band::Footer => page.size.height - margins.bottom + spacing,
+        };
+        let top = body - self.body_top;
+        page.items.extend(
+            self.items
+                .iter()
+                .cloned()
+                .map(|item| item.translate(margins.left, top)),
+        );
     }
 }
 
@@ -294,5 +385,64 @@ mod tests {
             .flatten()
             .collect();
         assert!(!glyphs.is_empty() && !glyphs.contains(&0), "{glyphs:?}");
+    }
+
+    fn margin_document(html: &str) -> MarginDocument {
+        let doc = presswork_dom::parse_html(html.as_bytes());
+        let fetcher = Fetcher::data_only();
+        let styles = Stylist::for_document(&doc, &fetcher);
+        Engine::new().layout_margin_document(&doc, &styles, 140.0, true, &fetcher)
+    }
+
+    #[test]
+    fn body_height_leaves_out_the_body_margins() {
+        let block = "<div style=\"padding-top: 20pt; background: red\"></div>";
+        let bare = margin_document(&format!("<body style=\"margin: 0\">{block}"));
+        assert_eq!(bare.body_height, 20.0);
+        // The default 8px body margin is outside the box.
+        let default = margin_document(block);
+        assert_eq!((default.body_top, default.body_height), (6.0, 20.0));
+        // Padding is inside it; a child's margin collapses through the
+        // body's top and stays outside.
+        let padded = margin_document(&format!(
+            "<body style=\"margin: 0; padding-bottom: 5pt\"><div style=\"margin-top: 30pt\"></div>{block}"
+        ));
+        assert_eq!((padded.body_top, padded.body_height), (30.0, 25.0));
+    }
+
+    #[test]
+    fn body_margins_stay_outside_the_page_margin() {
+        // A paragraph's 1em margin collapses through the body's 8px one.
+        let doc =
+            margin_document("<p style=\"padding-top: 10pt; margin: 12pt 0; background: red\"></p>");
+        assert_eq!((doc.body_top, doc.body_height), (12.0, 10.0));
+        let mut page = blank();
+        doc.draw(&mut page, Band::Header, 0.0, MARGINS);
+        doc.draw(&mut page, Band::Footer, 0.0, MARGINS);
+        assert_eq!(
+            fills(&page),
+            [
+                // Indented by the body's 8px side margins.
+                Rect::new(36.0, 20.0, 128.0, 10.0),
+                Rect::new(36.0, 270.0, 128.0, 10.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn header_documents_end_above_the_content_and_footers_start_below() {
+        let doc = margin_document(
+            "<body style=\"margin: 0\"><div style=\"padding-top: 20pt; background: red\"></div>",
+        );
+        let mut page = blank();
+        doc.draw(&mut page, Band::Header, 4.0, MARGINS);
+        doc.draw(&mut page, Band::Footer, 4.0, MARGINS);
+        assert_eq!(
+            fills(&page),
+            [
+                Rect::new(30.0, 30.0 - 4.0 - 20.0, 140.0, 20.0),
+                Rect::new(30.0, 270.0 + 4.0, 140.0, 20.0)
+            ]
+        );
     }
 }

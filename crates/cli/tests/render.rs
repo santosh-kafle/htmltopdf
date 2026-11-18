@@ -283,3 +283,47 @@ fn footers_number_the_pages() {
         assert!(page.contains("बिल"), "{page:?}");
     }
 }
+
+/// An HTML footer with the page-numbering script from wkhtmltopdf's
+/// documentation, as wicked_pdf and Snappy users write them.
+#[test]
+fn html_footers_number_the_pages() {
+    let dir = std::env::temp_dir().join(format!("presswork-footer-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let footer = dir.join("footer.html");
+    std::fs::write(
+        &footer,
+        r#"<!DOCTYPE html><html><head><script>
+function subst() {
+  var vars = {};
+  var query = document.location.search.substring(1).split('&');
+  for (var i in query) { var p = query[i].split('=', 2); vars[p[0]] = decodeURI(p[1]); }
+  var x = ['page', 'topage'];
+  for (var i in x) {
+    var y = document.getElementsByClassName(x[i]);
+    for (var j = 0; j < y.length; ++j) y[j].textContent = vars[x[i]];
+  }
+}
+</script></head><body onload="subst()">
+<p>पृष्ठ <span class="page"></span> / <span class="topage"></span></p>
+</body></html>"#,
+    )
+    .unwrap();
+    let html = "<p>एक</p><p style=\"break-before: page\">दुई</p>";
+    let out = presswork(
+        &["-q", "--footer-html", footer.to_str().unwrap(), "-", "-"],
+        html.as_bytes(),
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let Some(text) = extract_text(&out.stdout) else {
+        eprintln!("skipped: pdftotext is not installed");
+        return;
+    };
+    let pages: Vec<&str> = text.split('\u{c}').map(str::trim).collect();
+    assert_eq!(pages.len(), 2, "{text:?}");
+    for (index, page) in pages.iter().enumerate() {
+        assert!(page.contains(&format!("पृष्ठ {} / 2", index + 1)), "{page:?}");
+    }
+}

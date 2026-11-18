@@ -38,7 +38,7 @@ pub use fragment::{
     Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Page, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
-pub use margin::{Band, BandStyle, BandText};
+pub use margin::{Band, BandStyle, BandText, MarginDocument};
 pub use page::{Orientation, PageSize};
 
 /// Page geometry for a layout.

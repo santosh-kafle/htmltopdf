@@ -1,16 +1,30 @@
-//! wkhtmltopdf's text headers and footers: `--header-left` and friends,
-//! with `[page]`-style variables.
+//! wkhtmltopdf's headers and footers: text ones (`--header-left` and
+//! friends) with `[page]`-style variables, and HTML ones (`--header-html`).
 //!
 //! Matches wkhtmltopdf 0.12.6: the same defaults (12pt Arial, no line, no
 //! spacing), the same variables, `--replace` for custom ones, and
-//! `--default-header`. Headers do not enlarge the margins; set
+//! `--default-header`. Text headers do not enlarge the margins; set
 //! `--margin-top` and `--margin-bottom` to make room, as with wkhtmltopdf.
+//!
+//! HTML headers set the margin themselves when none is given: their body
+//! height plus the spacing. wkhtmltopdf passes the variables to them in the
+//! URL for a script to fill in. presswork runs no scripts, so when the
+//! document has one, it fills in elements whose class is a variable name,
+//! which is what the script in wkhtmltopdf's documentation does.
 
 use std::collections::HashMap;
 
+use anyhow::{Result, bail};
 use chrono::NaiveDateTime;
 use clap::{ArgAction, Args};
-use presswork_layout::{Band, BandStyle, BandText, EdgeSizes, Engine, Page};
+use presswork_dom::Document;
+use presswork_dom::resource::display_url;
+use presswork_layout::{
+    Band, BandStyle, BandText, EdgeSizes, Engine, Fetcher, LayoutOptions, LoadError, LoadFailure,
+    Loader, MarginDocument, Page,
+};
+use presswork_style::{Side, Stylist};
+use url::Url;
 
 use crate::page::parse_length;
 
@@ -118,7 +132,39 @@ pub(crate) struct HeaderArgs {
     /// given
     #[arg(long)]
     pub default_header: bool,
+
+    /// HTML file (path or file: URL) drawn above the content of every page.
+    /// Without --margin-top, the margin grows to fit it. Scripts do not run:
+    /// if it has one, elements whose class is a variable name (page, topage,
+    /// title, ...) get that variable's value, as the script in wkhtmltopdf's
+    /// documentation does
+    #[arg(long, value_name = "URL")]
+    pub header_html: Option<String>,
+
+    /// HTML file drawn below the content of every page, like --header-html
+    #[arg(long, value_name = "URL")]
+    pub footer_html: Option<String>,
 }
+
+/// A `--header-html` or `--footer-html` document.
+pub(crate) struct HtmlBand<'a> {
+    band: Band,
+    doc: Document,
+    styles: Stylist,
+    /// Loads its images, stylesheets and fonts, relative to its own URL.
+    pub fetcher: Fetcher<'a>,
+    spacing: f32,
+    /// Whether to fill in elements named after variables, page by page:
+    /// only if the document has a script, which wkhtmltopdf would run.
+    fill: bool,
+    images: bool,
+    /// Laid out once without variables: sizes the margin, and is what each
+    /// page shows when nothing is filled in.
+    laid_out: Option<MarginDocument>,
+}
+
+/// A user stylesheet's CSS and URL.
+pub(crate) type UserStyleSheet = (String, Url);
 
 /// What headers and footers can refer to, apart from page numbers.
 #[derive(Debug, Clone, Default)]
@@ -176,18 +222,139 @@ impl HeaderArgs {
         (style, text)
     }
 
+    /// Loads the `--header-html` and `--footer-html` documents, which are
+    /// read whatever the file access options say, since whoever runs
+    /// presswork named them; what they link to follows those options.
+    ///
+    /// A document that would need the network is recorded in `failures`
+    /// and left out. Returns the documents and any warnings.
+    pub fn load_html<'a>(
+        &self,
+        loader: &'a dyn Loader,
+        user_css: Option<&UserStyleSheet>,
+        images: bool,
+        failures: &mut Vec<LoadFailure>,
+    ) -> Result<(Vec<HtmlBand<'a>>, Vec<String>)> {
+        let mut bands = Vec::new();
+        let mut warnings = Vec::new();
+        let sources = [
+            (
+                Band::Header,
+                "--header-html",
+                &self.header_html,
+                self.header_spacing,
+            ),
+            (
+                Band::Footer,
+                "--footer-html",
+                &self.footer_html,
+                self.footer_spacing,
+            ),
+        ];
+        for (band, option, value, spacing) in sources {
+            let Some(value) = value else {
+                continue;
+            };
+            if value.trim_start().starts_with('<') {
+                bail!("{option} should be a path or URL, not HTML");
+            }
+            if value.contains("://") && !value.starts_with("file:") {
+                failures.push(LoadFailure {
+                    url: display_url(value).into_owned(),
+                    error: LoadError::Network,
+                });
+                continue;
+            }
+            let (bytes, url) = crate::read_local(value)?;
+            let doc = presswork_dom::parse_html(&bytes);
+            let fetcher = Fetcher::new(loader, Some(url));
+            let mut styles = Stylist::new();
+            if let Some((css, url)) = user_css {
+                styles.add_user_stylesheet(css, Some(url.clone()), &fetcher);
+            }
+            styles.add_document(&doc, &fetcher);
+            let fill = doc.find_element("script").is_some();
+            if fill
+                && fill_targets(&doc, &self.variables(1, 1, &DocumentInfo::default())).is_empty()
+            {
+                warnings.push(format!(
+                    "warning: {option} has a script, which presswork does not run; \
+                     to show page numbers, give elements a class such as page or topage"
+                ));
+            }
+            bands.push(HtmlBand {
+                band,
+                doc,
+                styles,
+                fetcher,
+                spacing,
+                fill,
+                images,
+                laid_out: None,
+            });
+        }
+        Ok((bands, warnings))
+    }
+
+    /// Lays out the HTML headers and footers once and makes room for them,
+    /// as wkhtmltopdf does: a margin given explicitly (`top` and `bottom`,
+    /// from the command line or `@page`) grows by the spacing; a missing
+    /// one becomes the document's body height plus the spacing.
+    pub fn fit_margins(
+        bands: &mut [HtmlBand<'_>],
+        engine: &mut Engine,
+        layout: &mut LayoutOptions,
+        top: Option<f32>,
+        bottom: Option<f32>,
+    ) {
+        let margins = &mut layout.margins;
+        let width = layout.page_size.width - margins.left - margins.right;
+        for band in bands {
+            let laid_out = engine.layout_margin_document(
+                &band.doc,
+                &band.styles,
+                width,
+                band.images,
+                &band.fetcher,
+            );
+            let (explicit, margin) = match band.band {
+                Band::Header => (top, &mut margins.top),
+                Band::Footer => (bottom, &mut margins.bottom),
+            };
+            *margin = (explicit.unwrap_or(laid_out.body_height) + band.spacing).max(0.0);
+            band.laid_out = Some(laid_out);
+        }
+    }
+
+    /// The margins given for the page, if any: on the command line, by
+    /// `--default-header`, or by the document's `@page` rule.
+    pub fn explicit_margins(
+        &self,
+        top: Option<f32>,
+        bottom: Option<f32>,
+        page: &presswork_style::PageRule,
+    ) -> (Option<f32>, Option<f32>) {
+        (
+            top.or(self.default_margin_top())
+                .or(page.margin.get(Side::Top)),
+            bottom.or(page.margin.get(Side::Bottom)),
+        )
+    }
+
     /// The `--margin-top` that `--default-header` implies: 2cm.
     pub fn default_margin_top(&self) -> Option<f32> {
         self.default_header.then(|| 20.0 * 72.0 / 25.4)
     }
 
-    /// Draws the headers and footers on every page, if there are any.
+    /// Draws the headers and footers on every page, if there are any:
+    /// text first, then HTML, as wkhtmltopdf does.
     pub fn draw(
         &self,
         engine: &mut Engine,
         pages: &mut [Page],
         margins: EdgeSizes,
         info: &DocumentInfo,
+        html: &[HtmlBand<'_>],
     ) {
         let bands = [(Band::Header, self.header()), (Band::Footer, self.footer())];
         let bands: Vec<_> = bands
@@ -197,7 +364,7 @@ impl HeaderArgs {
                     || !(text.left.is_empty() && text.center.is_empty() && text.right.is_empty())
             })
             .collect();
-        if bands.is_empty() {
+        if bands.is_empty() && html.is_empty() {
             return;
         }
         let count = pages.len();
@@ -215,6 +382,24 @@ impl HeaderArgs {
                     right: &right,
                 };
                 engine.draw_band(page, *band, style, text, margins);
+            }
+            for band in html {
+                if band.fill {
+                    let mut doc = band.doc.clone();
+                    fill_variables(&mut doc, &vars);
+                    let width = page.size.width - margins.left - margins.right;
+                    engine
+                        .layout_margin_document(
+                            &doc,
+                            &band.styles,
+                            width,
+                            band.images,
+                            &band.fetcher,
+                        )
+                        .draw(page, band.band, band.spacing, margins);
+                } else if let Some(laid_out) = &band.laid_out {
+                    laid_out.draw(page, band.band, band.spacing, margins);
+                }
             }
         }
     }
@@ -254,6 +439,39 @@ impl HeaderArgs {
         ];
         vars.extend(builtins.map(|(name, value)| (name.to_owned(), value)));
         vars
+    }
+}
+
+/// The elements of `doc` to fill in: those with a class named after a
+/// variable, with that variable's value.
+fn fill_targets<'v>(
+    doc: &Document,
+    vars: &'v HashMap<String, String>,
+) -> Vec<(presswork_dom::NodeId, &'v str)> {
+    doc.descendants(doc.root())
+        .filter_map(|id| {
+            let class = doc.element(id)?.attr("class")?;
+            let value = class
+                .split_ascii_whitespace()
+                .find_map(|name| vars.get(name))?;
+            Some((id, value.as_str()))
+        })
+        .collect()
+}
+
+/// Sets the text of each element whose class names a variable to that
+/// variable's value, as the script in wkhtmltopdf's documentation does:
+///
+/// ```js
+/// var x = ['page', 'topage', ...];
+/// for (var i in x) {
+///     var y = document.getElementsByClassName(x[i]);
+///     for (var j = 0; j < y.length; ++j) y[j].textContent = vars[x[i]];
+/// }
+/// ```
+fn fill_variables(doc: &mut Document, vars: &HashMap<String, String>) {
+    for (id, value) in fill_targets(doc, vars) {
+        doc.set_text_content(id, value);
     }
 }
 
@@ -444,5 +662,94 @@ mod tests {
         assert!((args.header().0.spacing - 5.0 * 72.0 / 25.4).abs() < 1e-4);
         let bad = Cli::try_parse_from(["presswork", "--header-font-size", "0"]);
         assert!(bad.is_err());
+    }
+
+    /// Writes `html` to a fresh temporary file and returns its path.
+    fn temp_html(name: &str, html: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("presswork-headers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, html).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn load(args: &HeaderArgs) -> (Vec<HtmlBand<'static>>, Vec<String>, Vec<LoadFailure>) {
+        let mut failures = Vec::new();
+        let (bands, warnings) = args
+            .load_html(&presswork_layout::DataUrls, None, true, &mut failures)
+            .unwrap();
+        (bands, warnings, failures)
+    }
+
+    #[test]
+    fn html_headers_size_missing_margins_and_widen_given_ones() {
+        let header = temp_html(
+            "sized.html",
+            "<body style=\"margin: 0\"><div style=\"padding-top: 40pt\"></div>",
+        );
+        let spacing_mm = "5";
+        let spacing = 5.0 * 72.0 / 25.4;
+        let args = parse(&[
+            "--header-html",
+            &header,
+            "--header-spacing",
+            spacing_mm,
+            "--footer-html",
+            &header,
+        ]);
+        let (mut bands, warnings, failures) = load(&args);
+        assert!(warnings.is_empty() && failures.is_empty());
+        let mut engine = Engine::new();
+
+        let mut layout = LayoutOptions::default();
+        HeaderArgs::fit_margins(&mut bands, &mut engine, &mut layout, None, None);
+        assert!((layout.margins.top - (40.0 + spacing)).abs() < 1e-3);
+        assert_eq!(layout.margins.bottom, 40.0);
+
+        // Given margins grow by the spacing instead.
+        let mut layout = LayoutOptions::default();
+        HeaderArgs::fit_margins(&mut bands, &mut engine, &mut layout, Some(10.0), Some(20.0));
+        assert!((layout.margins.top - (10.0 + spacing)).abs() < 1e-3);
+        assert_eq!(layout.margins.bottom, 20.0);
+    }
+
+    #[test]
+    fn html_headers_must_be_files() {
+        let args = parse(&["--header-html", "<p>Invoice</p>"]);
+        let mut failures = Vec::new();
+        let result = args.load_html(&presswork_layout::DataUrls, None, true, &mut failures);
+        assert!(result.is_err());
+
+        // Network URLs are reported like other network resources.
+        let args = parse(&["--footer-html", "https://example.com/footer.html"]);
+        let (bands, _, failures) = load(&args);
+        assert!(bands.is_empty());
+        assert_eq!(failures[0].error, LoadError::Network);
+    }
+
+    #[test]
+    fn scripts_get_their_page_number_classes_filled_in() {
+        let html = "<script>subst()</script><p>Page <span class=\"page\">?</span> of \
+                    <span class=\"x topage\"></span></p>";
+        let args = parse(&["--footer-html", &temp_html("subst.html", html)]);
+        let (bands, warnings, _) = load(&args);
+        assert!(bands[0].fill && warnings.is_empty());
+        let mut doc = bands[0].doc.clone();
+        fill_variables(&mut doc, &args.variables(2, 3, &info()));
+        let p = doc.find_element("p").unwrap();
+        assert_eq!(doc.text_content(p), "Page 2 of 3");
+
+        // Without a script, wkhtmltopdf would show the document as it is.
+        let args = parse(&[
+            "--footer-html",
+            &temp_html("static.html", "<p class=page>x"),
+        ]);
+        assert!(!load(&args).0[0].fill);
+
+        // A script presswork cannot stand in for is pointed out.
+        let html = "<script>document.getElementById('n').textContent = 1</script><b id=n>";
+        let args = parse(&["--header-html", &temp_html("id.html", html)]);
+        let warnings = load(&args).1;
+        assert!(warnings[0].contains("--header-html"), "{warnings:?}");
     }
 }

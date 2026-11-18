@@ -15,7 +15,7 @@ use presswork_paint::PdfOptions;
 use presswork_style::Stylist;
 use url::Url;
 
-use headers::{DocumentInfo, HeaderArgs};
+use headers::{DocumentInfo, HeaderArgs, UserStyleSheet};
 use loader::ResourceArgs;
 use page::PageArgs;
 
@@ -211,14 +211,14 @@ impl Cli {
     }
 }
 
-/// Reads `--user-style-sheet`: a path or `file:` URL, given by whoever
-/// runs presswork, so the document's file access rules do not apply to it.
-/// Returns the CSS and its URL.
-fn read_user_style_sheet(value: &str) -> Result<(String, Url)> {
+/// Reads a file named on the command line (a path or `file:` URL), such
+/// as `--user-style-sheet`: whoever runs presswork named it, so the
+/// document's file access rules do not apply. Returns its bytes and URL.
+fn read_local(value: &str) -> Result<(Vec<u8>, Url)> {
     let path = if value.starts_with("file:") {
         file_url_to_path(value)?
     } else if value.contains("://") {
-        bail!("loading stylesheets from URLs is not supported: {value}");
+        bail!("loading files from URLs is not supported: {value}");
     } else {
         std::path::absolute(value).with_context(|| format!("failed to resolve {value}"))?
     };
@@ -226,6 +226,12 @@ fn read_user_style_sheet(value: &str) -> Result<(String, Url)> {
         std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let url = Url::from_file_path(&path)
         .map_err(|()| anyhow::anyhow!("cannot make a URL for {}", path.display()))?;
+    Ok((bytes, url))
+}
+
+/// Reads `--user-style-sheet`. Returns the CSS and its URL.
+fn read_user_style_sheet(value: &str) -> Result<UserStyleSheet> {
+    let (bytes, url) = read_local(value)?;
     let css = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
     Ok((css.into_owned(), url))
 }
@@ -235,12 +241,25 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
     let doc = presswork_dom::parse_html(html);
     let loader = cli.resources.loader();
     let fetcher = Fetcher::new(&loader, Some(base));
+    let user_css = (cli.user_style_sheet.as_deref())
+        .map(read_user_style_sheet)
+        .transpose()?;
     let mut styles = Stylist::new();
-    if let Some(sheet) = &cli.user_style_sheet {
-        let (css, url) = read_user_style_sheet(sheet)?;
-        styles.add_user_stylesheet(&css, Some(url), &fetcher);
+    if let Some((css, url)) = &user_css {
+        styles.add_user_stylesheet(css, Some(url.clone()), &fetcher);
     }
     styles.add_document(&doc, &fetcher);
+    let images = !cli.resources.no_images;
+    let mut failures = Vec::new();
+    let (mut html_bands, warnings) =
+        cli.headers
+            .load_html(&loader, user_css.as_ref(), images, &mut failures)?;
+    if !cli.quiet {
+        for warning in warnings {
+            eprintln!("{warning}");
+        }
+    }
+
     let mut layout = cli.page.layout_options(styles.page());
     // --default-header implies a 2cm top margin, as if given with -T.
     if cli.page.margin_top.is_none()
@@ -248,7 +267,7 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
     {
         layout.margins.top = top;
     }
-    layout.images = !cli.resources.no_images;
+    layout.images = images;
     let mut engine = Engine::new();
     if !engine.has_system_fonts() {
         // Always shown: the PDF would have no visible text.
@@ -257,6 +276,9 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
              install fontconfig and at least one font package"
         );
     }
+    let (top, bottom) =
+        (cli.headers).explicit_margins(cli.page.margin_top, cli.page.margin_bottom, styles.page());
+    HeaderArgs::fit_margins(&mut html_bands, &mut engine, &mut layout, top, bottom);
     let mut pages = engine.layout(&doc, &styles, &layout, &fetcher);
     // wkhtmltopdf uses the document's <title> unless --title is given.
     let title = cli.title.clone().or_else(|| doc.title());
@@ -267,14 +289,17 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
         now: chrono::Local::now().naive_local(),
     };
     cli.headers
-        .draw(&mut engine, &mut pages, layout.margins, &info);
+        .draw(&mut engine, &mut pages, layout.margins, &info, &html_bands);
     let options = PdfOptions {
         title,
         author: None,
     };
     let pdf = presswork_paint::render_pdf(&pages, &options)?;
 
-    let mut failures = fetcher.failures();
+    failures.extend(fetcher.failures());
+    for band in &html_bands {
+        failures.extend(band.fetcher.failures());
+    }
     failures.extend(pdf.broken_images.into_iter().map(|url| LoadFailure {
         url,
         error: LoadError::Failed("the image data is corrupt".to_owned()),
@@ -442,9 +467,9 @@ mod tests {
         let (cli, n) = parse(&["--strict", "--outline", "a", "b"]).unwrap();
         assert!(cli.check_ignored(&n).is_ok());
 
-        let (cli, n) = parse(&["--strict", "--footer-html", "f.html", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["--strict", "--viewport-size", "800x600", "a", "b"]).unwrap();
         let err = cli.check_ignored(&n).unwrap_err().to_string();
-        assert!(err.contains("--footer-html"), "{err}");
+        assert!(err.contains("--viewport-size"), "{err}");
     }
 
     #[test]

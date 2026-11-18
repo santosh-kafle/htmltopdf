@@ -172,7 +172,7 @@ impl Flow<'_, '_> {
             left: has(Side::Left),
         };
 
-        let open = self.open_box(style, &geometry, x);
+        let open = self.open_box(style, &geometry, x, false);
         self.settle_margin();
         self.y += f64::from(spacing);
 

@@ -81,6 +81,17 @@ pub(crate) struct BoxPaint {
 }
 
 impl BoxPaint {
+    /// Paints nothing.
+    pub const INVISIBLE: Self = Self {
+        background: Color::TRANSPARENT,
+        border: [
+            (Side::Top, 0.0, Color::TRANSPARENT),
+            (Side::Right, 0.0, Color::TRANSPARENT),
+            (Side::Bottom, 0.0, Color::TRANSPARENT),
+            (Side::Left, 0.0, Color::TRANSPARENT),
+        ],
+    };
+
     /// The paint for a box with this style, or `None` if nothing is
     /// visible.
     pub fn from_style(style: &ComputedStyle) -> Option<Self> {
@@ -289,6 +300,9 @@ pub(crate) struct Flow<'c, 'a> {
     marker: Option<String>,
     /// The next slice must start a new page.
     force_break: bool,
+    /// An element whose border box to report, and the decoration that
+    /// records it once laid out. See [`Flow::track`].
+    tracked: Option<(NodeId, Option<usize>)>,
 }
 
 /// A box entered with [`Flow::open_box`].
@@ -316,7 +330,22 @@ impl<'c, 'a> Flow<'c, 'a> {
             edges: 0.0,
             marker: None,
             force_break: false,
+            tracked: None,
         }
+    }
+
+    /// Asks for the canvas position of `id`'s border box, which
+    /// [`Flow::tracked_box`] gives once it is laid out.
+    pub fn track(&mut self, id: NodeId) {
+        self.tracked = Some((id, None));
+    }
+
+    /// The top and bottom of the tracked element's border box, if it was
+    /// laid out as a block.
+    pub fn tracked_box(&self) -> Option<(f64, f64)> {
+        let index = self.tracked?.1?;
+        let decoration = &self.canvas.decorations[index];
+        Some((decoration.top, decoration.bottom))
     }
 
     /// Finishes the flow, returning its content and total height.
@@ -388,13 +417,25 @@ impl<'c, 'a> Flow<'c, 'a> {
             self.record_extent(outer, outer);
             return;
         }
-        let open = self.open_box(style, &geometry, x);
+        let tracked = self.tracked.is_some_and(|(tracked, _)| tracked == id);
+        let open = self.open_box(style, &geometry, x, tracked);
+        if tracked && let Some((_, index)) = &mut self.tracked {
+            *index = open.decoration;
+        }
         self.block_contents(id, style, x + geometry.content_x(), geometry.content_width);
         self.close_box(style, &geometry, open);
     }
 
     /// Starts a box: top margin, border and padding, and its decoration.
-    fn open_box(&mut self, style: &ComputedStyle, geometry: &BoxGeometry, x: f32) -> OpenBox {
+    /// A `tracked` box gets a decoration even if it paints nothing, so
+    /// that its position is worked out like any other's.
+    fn open_box(
+        &mut self,
+        style: &ComputedStyle,
+        geometry: &BoxGeometry,
+        x: f32,
+        tracked: bool,
+    ) -> OpenBox {
         if style.break_before == Break::Page {
             self.force_break = true;
         }
@@ -404,7 +445,7 @@ impl<'c, 'a> Flow<'c, 'a> {
         let paint = if self.is_measuring() {
             None
         } else {
-            BoxPaint::from_style(style)
+            BoxPaint::from_style(style).or(tracked.then_some(BoxPaint::INVISIBLE))
         };
         let decoration = paint.map(|paint| {
             self.canvas.decorations.push(Decoration {

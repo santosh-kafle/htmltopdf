@@ -207,7 +207,7 @@ impl Flow<'_, '_> {
             return;
         }
 
-        let open = self.open_box(style, &geometry, x);
+        let open = self.open_box(style, &geometry, x, false);
         self.settle_margin();
         let items = data
             .map(|data| {

@@ -239,6 +239,17 @@ impl Document {
         (!collapsed.is_empty()).then_some(collapsed)
     }
 
+    /// Replaces the children of `id` with one text node holding `text`, as
+    /// setting `textContent` does in a browser.
+    pub fn set_text_content(&mut self, id: NodeId, text: &str) {
+        for child in std::mem::take(&mut self.nodes[id.index()].children) {
+            self.nodes[child.index()].parent = None;
+        }
+        if !text.is_empty() {
+            self.append(id, NodeKind::Text(text.to_owned()));
+        }
+    }
+
     /// Iterates over the children of `id` in document order.
     pub fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.node(id).children.iter().copied()
@@ -261,6 +272,18 @@ mod tests {
             namespace: parse::html_namespace(),
             attributes: Vec::new(),
         })
+    }
+
+    #[test]
+    fn set_text_content_replaces_children() {
+        let mut doc = parse_html(b"<p>Page <b>x</b> of <i>y</i></p>");
+        let p = doc.find_element("p").unwrap();
+        let b = doc.find_element("b").unwrap();
+        doc.set_text_content(b, "2");
+        assert_eq!(doc.text_content(p), "Page 2 of y");
+        doc.set_text_content(p, "");
+        assert_eq!(doc.children(p).count(), 0);
+        assert_eq!(doc.node(b).parent, None);
     }
 
     #[test]

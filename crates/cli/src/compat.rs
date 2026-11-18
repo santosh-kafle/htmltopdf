@@ -146,7 +146,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("footer-center", None, Pass(1)),
     ("footer-font-name", None, Pass(1)),
     ("footer-font-size", None, Pass(1)),
-    ("footer-html", None, Lossy(1)),
+    ("footer-html", None, Pass(1)),
     ("footer-left", None, Pass(1)),
     ("footer-line", None, Pass(0)),
     ("no-footer-line", None, Pass(0)),
@@ -155,7 +155,7 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("header-center", None, Pass(1)),
     ("header-font-name", None, Pass(1)),
     ("header-font-size", None, Pass(1)),
-    ("header-html", None, Lossy(1)),
+    ("header-html", None, Pass(1)),
     ("header-left", None, Pass(1)),
     ("header-line", None, Pass(0)),
     ("no-header-line", None, Pass(0)),
@@ -340,14 +340,14 @@ mod tests {
             "name",
             "value",
             "--outline",
-            "--footer-html",
-            "footer.html",
+            "--viewport-size",
+            "800x600",
             "in.html",
             "out.pdf",
         ]);
         assert_eq!(r.args, ["in.html", "out.pdf"]);
         assert_eq!(r.ignored, ["--cookie", "--outline"]);
-        assert_eq!(r.lossy, ["--zoom", "-d", "--footer-html"]);
+        assert_eq!(r.lossy, ["--zoom", "-d", "--viewport-size"]);
     }
 
     #[test]

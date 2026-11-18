@@ -89,12 +89,19 @@ maintained, and accepts the same command line.
   `[webpage]`, `[date]`, `[isodate]` and `[time]`, plus any set with
   `--replace`. The text can be in any script, for example
   `--footer-center "पृष्ठ [page] / [topage]"`.
+- **HTML headers and footers.** `--header-html` and `--footer-html` take a
+  path or `file:` URL and draw that document in the top or bottom margin
+  of every page. Without `--margin-top` (or `--margin-bottom`), the margin
+  grows to fit it; with one, the margin grows by the spacing, as in
+  wkhtmltopdf. Images and stylesheets it links to follow the file access
+  options. Page numbers work through the usual wkhtmltopdf script without
+  running it; see below.
 
 Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
 floats and positioning, flexbox and grid, generated content (`::before`), text
 decoration, `height`, row-spanning cells (they occupy their first row only),
-HTML headers and footers (`--header-html`, `--footer-html`), the
-`[section]` header variables (always empty), and the table of contents.
+the `[section]` header variables (always empty), and the table of
+contents.
 
 ## Usage
 
@@ -108,6 +115,16 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 
 - **No JavaScript.** `--javascript-delay`, `--window-status` and
   `--run-script` have no effect. Render dynamic content on the server first.
+  HTML headers and footers usually carry the script from wkhtmltopdf's
+  documentation, which fills elements with class `page`, `topage`,
+  `title` and so on from the URL. When a header or footer has a script,
+  presswork fills those elements itself, with every variable a text
+  header can use, so such templates work unchanged. Other scripts do not
+  run; presswork warns when a header's script has nothing it can fill.
+- **HTML header placement.** The header's `<body>` box ends right above
+  the content (less `--header-spacing`), and a footer's starts right below
+  it, so a body margin stays outside the page margin instead of pushing the
+  header into the content or the footer off the page.
 - **No network access.** Documents and images are never fetched from
   `http(s)://` URLs. An image that would need the network is reported even
   under `--quiet`, since wkhtmltopdf would have loaded it, and `--strict`
@@ -132,7 +149,7 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 
 ## Building
 
-Requires Rust 1.88 or newer.
+Requires Rust 1.92 or newer.
 
 ```sh
 cargo build --release
