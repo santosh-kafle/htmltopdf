@@ -195,6 +195,42 @@ keyword_enum! {
 }
 
 keyword_enum! {
+    TextTransform {
+        None = "none",
+        Uppercase = "uppercase",
+        Lowercase = "lowercase",
+        Capitalize = "capitalize",
+    }
+}
+
+/// The lines of `text-decoration-line`. Several can be set at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextDecorationLine {
+    pub underline: bool,
+    pub overline: bool,
+    pub line_through: bool,
+}
+
+impl TextDecorationLine {
+    pub const NONE: Self = Self {
+        underline: false,
+        overline: false,
+        line_through: false,
+    };
+}
+
+/// A specified `text-indent`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextIndentValue {
+    /// A length or a percentage of the containing block's width.
+    pub length: Dim,
+    /// `hanging`: indent every line but the first.
+    pub hanging: bool,
+    /// `each-line`: also indent lines after a forced line break.
+    pub each_line: bool,
+}
+
+keyword_enum! {
     /// The CSS-wide keywords every property accepts.
     CssWide {
         Inherit = "inherit",
@@ -277,6 +313,13 @@ pub enum LonghandId {
     ListStyleType,
     BreakBefore,
     BreakAfter,
+    MinHeight,
+    TextDecorationLine,
+    TextDecorationColor,
+    TextIndent,
+    TextTransform,
+    LetterSpacing,
+    WordSpacing,
 }
 
 impl LonghandId {
@@ -285,10 +328,12 @@ impl LonghandId {
         use LonghandId::*;
         match self {
             Color | FontFamily | FontSize | FontWeight | FontStyle | LineHeight | TextAlign
-            | WhiteSpace | BorderCollapse | BorderSpacing | ListStyleType => true,
+            | WhiteSpace | BorderCollapse | BorderSpacing | ListStyleType | TextIndent
+            | TextTransform | LetterSpacing | WordSpacing => true,
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
-            | BoxSizing | VerticalAlign | BreakBefore | BreakAfter => false,
+            | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
+            | TextDecorationLine | TextDecorationColor => false,
         }
     }
 
@@ -317,6 +362,13 @@ impl LonghandId {
             ListStyleType,
             BreakBefore,
             BreakAfter,
+            MinHeight,
+            TextDecorationLine,
+            TextDecorationColor,
+            TextIndent,
+            TextTransform,
+            LetterSpacing,
+            WordSpacing,
         ];
         let sided = Side::ALL.into_iter().flat_map(|side| {
             [
@@ -364,6 +416,16 @@ pub enum PropertyDeclaration {
     ListStyleType(ListStyleType),
     BreakBefore(Break),
     BreakAfter(Break),
+    /// `auto` is [`Dim::Auto`], which means zero.
+    MinHeight(Dim),
+    TextDecorationLine(TextDecorationLine),
+    TextDecorationColor(ColorValue),
+    TextIndent(TextIndentValue),
+    TextTransform(TextTransform),
+    /// `normal` is zero.
+    LetterSpacing(Length),
+    /// `normal` is zero.
+    WordSpacing(Length),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -399,6 +461,13 @@ impl PropertyDeclaration {
             D::ListStyleType(_) => LonghandId::ListStyleType,
             D::BreakBefore(_) => LonghandId::BreakBefore,
             D::BreakAfter(_) => LonghandId::BreakAfter,
+            D::MinHeight(_) => LonghandId::MinHeight,
+            D::TextDecorationLine(_) => LonghandId::TextDecorationLine,
+            D::TextDecorationColor(_) => LonghandId::TextDecorationColor,
+            D::TextIndent(_) => LonghandId::TextIndent,
+            D::TextTransform(_) => LonghandId::TextTransform,
+            D::LetterSpacing(_) => LonghandId::LetterSpacing,
+            D::WordSpacing(_) => LonghandId::WordSpacing,
             D::CssWide(id, _) => *id,
         }
     }
@@ -456,6 +525,14 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "list-style-type" | "list-style" => one(L::ListStyleType),
         "break-before" | "page-break-before" => one(L::BreakBefore),
         "break-after" | "page-break-after" => one(L::BreakAfter),
+        "min-height" => one(L::MinHeight),
+        "text-decoration-line" => one(L::TextDecorationLine),
+        "text-decoration-color" => one(L::TextDecorationColor),
+        "text-decoration" => Some(vec![L::TextDecorationLine, L::TextDecorationColor]),
+        "text-indent" => one(L::TextIndent),
+        "text-transform" => one(L::TextTransform),
+        "letter-spacing" => one(L::LetterSpacing),
+        "word-spacing" => one(L::WordSpacing),
         "font" => Some(vec![
             L::FontStyle,
             L::FontWeight,
@@ -535,6 +612,7 @@ pub fn parse_declaration(
         "font" => parse_font(input, out)?,
         "background" => out.push(D::BackgroundColor(parse_background(input))),
         "list-style" => out.push(D::ListStyleType(parse_list_style(input))),
+        "text-decoration" => parse_text_decoration(input, out)?,
         _ => out.push(parse_longhand(longhands[0], input)?),
     }
     input.expect_exhausted().map_err(Invalid::from)
@@ -577,6 +655,13 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::ListStyleType => D::ListStyleType(ListStyleType::parse(input)?),
         L::BreakBefore => D::BreakBefore(Break::parse(input)?),
         L::BreakAfter => D::BreakAfter(Break::parse(input)?),
+        L::MinHeight => D::MinHeight(Dim::parse(input, true, false)?),
+        L::TextDecorationLine => D::TextDecorationLine(parse_text_decoration_line(input)?),
+        L::TextDecorationColor => D::TextDecorationColor(ColorValue::parse(input)?),
+        L::TextIndent => D::TextIndent(parse_text_indent(input)?),
+        L::TextTransform => D::TextTransform(TextTransform::parse(input)?),
+        L::LetterSpacing => D::LetterSpacing(parse_spacing(input)?),
+        L::WordSpacing => D::WordSpacing(parse_spacing(input)?),
     })
 }
 
@@ -833,6 +918,140 @@ fn parse_background(input: &mut Parser<'_>) -> ColorValue {
     color
 }
 
+/// `text-decoration-line`: `none`, or any of `underline`, `overline`,
+/// `line-through` and `blink` (which is ignored), each at most once.
+fn parse_text_decoration_line(input: &mut Parser<'_>) -> Parsed<TextDecorationLine> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(TextDecorationLine::NONE);
+    }
+    let mut line = TextDecorationLine::NONE;
+    let (mut any, mut blink) = (false, false);
+    loop {
+        // An unknown keyword ends the list unconsumed: in the shorthand it
+        // may be the style.
+        let keyword = input.try_parse(|i| {
+            let ident = i.expect_ident().map_err(Invalid::from)?;
+            match ident.to_ascii_lowercase().as_str() {
+                "underline" => Ok(0),
+                "overline" => Ok(1),
+                "line-through" => Ok(2),
+                "blink" => Ok(3),
+                _ => Err(Invalid),
+            }
+        });
+        let flag = match keyword {
+            Ok(0) => &mut line.underline,
+            Ok(1) => &mut line.overline,
+            Ok(2) => &mut line.line_through,
+            Ok(_) => &mut blink,
+            Err(Invalid) => break,
+        };
+        if *flag {
+            return Err(Invalid);
+        }
+        *flag = true;
+        any = true;
+    }
+    if any { Ok(line) } else { Err(Invalid) }
+}
+
+/// `text-decoration`: line, style, color and thickness in any order.
+/// Lines are always drawn solid and at the font's thickness, so the style
+/// and thickness are accepted but not used. Omitted parts reset.
+fn parse_text_decoration(input: &mut Parser<'_>, out: &mut Vec<PropertyDeclaration>) -> Parsed<()> {
+    const STYLES: [&str; 5] = ["solid", "double", "dotted", "dashed", "wavy"];
+    let (mut line, mut color) = (None, None);
+    let (mut style, mut thickness) = (false, false);
+    loop {
+        if line.is_none()
+            && let Ok(v) = input.try_parse(parse_text_decoration_line)
+        {
+            line = Some(v);
+        } else if !style
+            && input
+                .try_parse(|i| {
+                    let ident = i.expect_ident()?;
+                    let known = STYLES.iter().any(|s| ident.eq_ignore_ascii_case(s));
+                    if known { Ok(()) } else { Err(Invalid) }
+                })
+                .is_ok()
+        {
+            style = true;
+        } else if color.is_none()
+            && let Ok(v) = input.try_parse(ColorValue::parse)
+        {
+            color = Some(v);
+        } else if !thickness
+            && input
+                .try_parse(|i| {
+                    if i.try_parse(|i| i.expect_ident_matching("from-font"))
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                    Dim::parse(i, true, false).map(drop)
+                })
+                .is_ok()
+        {
+            thickness = true;
+        } else {
+            break;
+        }
+    }
+    if line.is_none() && color.is_none() && !style && !thickness {
+        return Err(Invalid);
+    }
+    out.extend([
+        PropertyDeclaration::TextDecorationLine(line.unwrap_or(TextDecorationLine::NONE)),
+        PropertyDeclaration::TextDecorationColor(color.unwrap_or(ColorValue::CurrentColor)),
+    ]);
+    Ok(())
+}
+
+/// `text-indent`: a length or percentage, optionally with `hanging` and
+/// `each-line`, in any order.
+fn parse_text_indent(input: &mut Parser<'_>) -> Parsed<TextIndentValue> {
+    let (mut length, mut hanging, mut each_line) = (None, false, false);
+    loop {
+        if length.is_none()
+            && let Ok(v) = input.try_parse(|i| Dim::parse(i, false, true))
+        {
+            length = Some(v);
+        } else if !hanging
+            && input
+                .try_parse(|i| i.expect_ident_matching("hanging"))
+                .is_ok()
+        {
+            hanging = true;
+        } else if !each_line
+            && input
+                .try_parse(|i| i.expect_ident_matching("each-line"))
+                .is_ok()
+        {
+            each_line = true;
+        } else {
+            break;
+        }
+    }
+    Ok(TextIndentValue {
+        length: length.ok_or(Invalid)?,
+        hanging,
+        each_line,
+    })
+}
+
+/// `letter-spacing` / `word-spacing`: `normal` or a length, which may be
+/// negative.
+fn parse_spacing(input: &mut Parser<'_>) -> Parsed<Length> {
+    if input
+        .try_parse(|i| i.expect_ident_matching("normal"))
+        .is_ok()
+    {
+        return Ok(Length::ZERO);
+    }
+    Length::parse(input)
+}
+
 /// `list-style`: only the marker type is used.
 fn parse_list_style(input: &mut Parser<'_>) -> ListStyleType {
     let mut style = ListStyleType::Disc;
@@ -1000,10 +1219,73 @@ mod tests {
     }
 
     #[test]
+    fn text_decoration_shorthand() {
+        let red = ColorValue::Color(Color::rgb(255, 0, 0));
+        let under = TextDecorationLine {
+            underline: true,
+            ..TextDecorationLine::NONE
+        };
+        assert_eq!(
+            parse("text-decoration", "red wavy underline 2px"),
+            Ok(vec![
+                D::TextDecorationLine(under),
+                D::TextDecorationColor(red)
+            ])
+        );
+        assert_eq!(
+            parse("text-decoration", "none"),
+            Ok(vec![
+                D::TextDecorationLine(TextDecorationLine::NONE),
+                D::TextDecorationColor(ColorValue::CurrentColor),
+            ])
+        );
+        assert_eq!(
+            parse("text-decoration-line", "line-through UNDERLINE"),
+            Ok(vec![D::TextDecorationLine(TextDecorationLine {
+                line_through: true,
+                ..under
+            })])
+        );
+        assert!(parse("text-decoration-line", "underline underline").is_err());
+        assert!(parse("text-decoration-line", "none underline").is_err());
+        assert!(parse("text-decoration", "").is_err());
+    }
+
+    #[test]
+    fn text_indent_spacing_and_transform() {
+        assert_eq!(
+            parse("text-indent", "hanging -2em"),
+            Ok(vec![D::TextIndent(TextIndentValue {
+                length: Dim::Length(Length::Em(-2.0)),
+                hanging: true,
+                each_line: false,
+            })])
+        );
+        assert!(parse("text-indent", "hanging").is_err());
+        assert_eq!(
+            parse("letter-spacing", "normal"),
+            Ok(vec![D::LetterSpacing(Length::ZERO)])
+        );
+        assert_eq!(
+            parse("word-spacing", "-1pt"),
+            Ok(vec![D::WordSpacing(Length::Pt(-1.0))])
+        );
+        assert_eq!(
+            parse("text-transform", "Uppercase"),
+            Ok(vec![D::TextTransform(TextTransform::Uppercase)])
+        );
+        assert_eq!(
+            parse("min-height", "auto"),
+            Ok(vec![D::MinHeight(Dim::Auto)])
+        );
+        assert!(parse("min-height", "-1px").is_err());
+    }
+
+    #[test]
     fn every_longhand_is_listed_once() {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 21 + 4 * 5);
+        assert_eq!(all.len(), 28 + 4 * 5);
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::properties::{
     BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, CssWide, Display,
     FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType, LonghandId,
-    PropertyDeclaration, TextAlign, VerticalAlign, WhiteSpace,
+    PropertyDeclaration, TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
 };
 use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
 
@@ -42,6 +42,55 @@ impl Default for BorderSide {
     }
 }
 
+/// The lines drawn on text, each with its color.
+///
+/// A box's `text-decoration` applies to all the text inside it, even text
+/// in descendants that set `text-decoration: none`, so each style carries
+/// the decorations of its ancestors (see
+/// [`ComputedStyle::text_decorations`]). Each line is drawn once: where
+/// nested boxes both underline, the innermost color is used.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TextDecorations {
+    pub underline: Option<Color>,
+    pub overline: Option<Color>,
+    pub line_through: Option<Color>,
+}
+
+impl TextDecorations {
+    pub const NONE: Self = Self {
+        underline: None,
+        overline: None,
+        line_through: None,
+    };
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::NONE
+    }
+
+    /// Adds the lines of `line` in `color`.
+    fn with(mut self, line: TextDecorationLine, color: Color) -> Self {
+        for (set, slot) in [
+            (line.underline, &mut self.underline),
+            (line.overline, &mut self.overline),
+            (line.line_through, &mut self.line_through),
+        ] {
+            if set {
+                *slot = Some(color);
+            }
+        }
+        self
+    }
+}
+
+/// A computed `text-indent`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextIndent {
+    /// A percentage is of the containing block's width.
+    pub length: Dimension,
+    pub hanging: bool,
+    pub each_line: bool,
+}
+
 /// The style of one element, with every font-relative length resolved to
 /// points. Percentages and `auto` remain for layout to resolve.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,14 +112,18 @@ pub struct ComputedStyle {
     pub padding: Sides<Dimension>,
     pub border: Sides<BorderSide>,
     pub width: Dimension,
-    /// Only images use `height` so far; blocks are as tall as their
-    /// content. A percentage behaves as `auto`, as the page has no
-    /// definite height to resolve it against.
+    /// Images and table cells and rows use it, and blocks as a minimum:
+    /// content taller than the box makes it grow instead of overflowing.
+    /// A percentage behaves as `auto`, as the page has no definite height
+    /// to resolve it against.
     pub height: Dimension,
     /// `Auto` means `none`.
     pub max_width: Dimension,
-    /// `Auto` means `none`. Only images use it so far.
+    /// `Auto` means `none`. Blocks are never cut shorter than their
+    /// content: see `height`.
     pub max_height: Dimension,
+    /// `Auto` means zero.
+    pub min_height: Dimension,
     pub box_sizing: BoxSizing,
     pub vertical_align: VerticalAlign,
     pub border_collapse: BorderCollapse,
@@ -79,6 +132,17 @@ pub struct ComputedStyle {
     pub list_style_type: ListStyleType,
     pub break_before: Break,
     pub break_after: Break,
+    pub text_decoration_line: TextDecorationLine,
+    pub text_decoration_color: ColorValue,
+    pub text_indent: TextIndent,
+    pub text_transform: TextTransform,
+    /// Extra space after each character, in points.
+    pub letter_spacing: f32,
+    /// Extra space after each word, in points.
+    pub word_spacing: f32,
+    /// The text decorations of the ancestors, which apply to this
+    /// element's text as well as its own. Not a CSS property.
+    pub inherited_decorations: TextDecorations,
     /// Content language from the `lang` attribute, e.g. `"ne"`. Inherited.
     /// Not a CSS property; used for font fallback and shaping.
     pub lang: Option<Arc<str>>,
@@ -114,6 +178,18 @@ impl ComputedStyle {
             list_style_type: ListStyleType::Disc,
             break_before: Break::Auto,
             break_after: Break::Auto,
+            min_height: Dimension::Auto,
+            text_decoration_line: TextDecorationLine::NONE,
+            text_decoration_color: ColorValue::CurrentColor,
+            text_indent: TextIndent {
+                length: Dimension::ZERO,
+                hanging: false,
+                each_line: false,
+            },
+            text_transform: TextTransform::None,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            inherited_decorations: TextDecorations::NONE,
             lang: None,
             root_font_size: DEFAULT_FONT_SIZE,
         }
@@ -126,6 +202,7 @@ impl ComputedStyle {
         for id in LonghandId::all().filter(|id| id.is_inherited()) {
             style.copy_longhand(id, parent);
         }
+        style.inherited_decorations = parent.text_decorations();
         style.lang = parent.lang.clone();
         style.root_font_size = parent.root_font_size;
         style
@@ -161,6 +238,13 @@ impl ComputedStyle {
             L::ListStyleType => self.list_style_type = other.list_style_type,
             L::BreakBefore => self.break_before = other.break_before,
             L::BreakAfter => self.break_after = other.break_after,
+            L::MinHeight => self.min_height = other.min_height,
+            L::TextDecorationLine => self.text_decoration_line = other.text_decoration_line,
+            L::TextDecorationColor => self.text_decoration_color = other.text_decoration_color,
+            L::TextIndent => self.text_indent = other.text_indent,
+            L::TextTransform => self.text_transform = other.text_transform,
+            L::LetterSpacing => self.letter_spacing = other.letter_spacing,
+            L::WordSpacing => self.word_spacing = other.word_spacing,
         }
     }
 
@@ -237,6 +321,19 @@ impl ComputedStyle {
             D::ListStyleType(v) => self.list_style_type = *v,
             D::BreakBefore(v) => self.break_before = *v,
             D::BreakAfter(v) => self.break_after = *v,
+            D::MinHeight(v) => self.min_height = v.compute(font_size, root),
+            D::TextDecorationLine(v) => self.text_decoration_line = *v,
+            D::TextDecorationColor(v) => self.text_decoration_color = *v,
+            D::TextIndent(v) => {
+                self.text_indent = TextIndent {
+                    length: v.length.compute(font_size, root),
+                    hanging: v.hanging,
+                    each_line: v.each_line,
+                };
+            }
+            D::TextTransform(v) => self.text_transform = *v,
+            D::LetterSpacing(v) => self.letter_spacing = pt(*v),
+            D::WordSpacing(v) => self.word_spacing = pt(*v),
             D::CssWide(id, keyword) => {
                 let inherit = match keyword {
                     CssWide::Inherit => true,
@@ -255,6 +352,15 @@ impl ComputedStyle {
     /// The color of the border on `side`, with `currentcolor` resolved.
     pub fn border_color(&self, side: Side) -> Color {
         self.border.get(side).color.resolve(self.color)
+    }
+
+    /// The lines to draw on this element's text: its ancestors' and its
+    /// own.
+    pub fn text_decorations(&self) -> TextDecorations {
+        self.inherited_decorations.with(
+            self.text_decoration_line,
+            self.text_decoration_color.resolve(self.color),
+        )
     }
 
     /// The used border widths in points.
@@ -332,6 +438,42 @@ mod tests {
         );
         assert_eq!(style.border_widths().top, 2.25);
         assert_eq!(style.border_color(Side::Top), Color::BLACK);
+    }
+
+    #[test]
+    fn text_decorations_reach_descendants_that_unset_them() {
+        let initial = ComputedStyle::initial();
+        let mut parent = ComputedStyle::inheriting(&initial);
+        let underline = TextDecorationLine {
+            underline: true,
+            ..TextDecorationLine::NONE
+        };
+        parent.apply(&D::TextDecorationLine(underline), &initial);
+        parent.apply(
+            &D::Color(ColorValue::Color(Color::rgb(255, 0, 0))),
+            &initial,
+        );
+
+        let mut child = ComputedStyle::inheriting(&parent);
+        // Not inherited as a property...
+        assert_eq!(child.text_decoration_line, TextDecorationLine::NONE);
+        child.apply(&D::Color(ColorValue::Color(Color::BLACK)), &parent);
+        let strike = TextDecorationLine {
+            line_through: true,
+            ..TextDecorationLine::NONE
+        };
+        child.apply(&D::TextDecorationLine(strike), &parent);
+        // ...but still drawn, in the color of the box that set it.
+        assert_eq!(
+            child.text_decorations(),
+            TextDecorations {
+                underline: Some(Color::rgb(255, 0, 0)),
+                overline: None,
+                line_through: Some(Color::BLACK),
+            }
+        );
+        let grandchild = ComputedStyle::inheriting(&child);
+        assert_eq!(grandchild.text_decorations(), child.text_decorations());
     }
 
     #[test]

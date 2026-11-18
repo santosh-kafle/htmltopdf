@@ -7,7 +7,8 @@
 //! on.
 //!
 //! Not supported yet: cells spanning rows are placed correctly but only
-//! occupy their first row; `<col>` widths; `height`; the full collapsed
+//! occupy their first row; `<col>` widths; `height` on the table and row
+//! groups (cells and rows take it as a minimum); the full collapsed
 //! border model (shared borders are drawn once, without conflict
 //! resolution).
 
@@ -46,6 +47,17 @@ impl Cell {
 
     fn vertical_edges(&self) -> f32 {
         self.border.top + self.border.bottom + self.padding.top + self.padding.bottom
+    }
+
+    /// The least border-box height its `height` asks for: as in browsers,
+    /// a cell (and a row) grows to fit taller content. `min-height` and
+    /// `max-height` do not apply to cells.
+    fn min_height(&self) -> f32 {
+        match (self.style.height, self.style.box_sizing) {
+            (Dimension::Pt(height), BoxSizing::ContentBox) => height + self.vertical_edges(),
+            (Dimension::Pt(height), BoxSizing::BorderBox) => height,
+            _ => 0.0,
+        }
     }
 }
 
@@ -344,8 +356,14 @@ impl Flow<'_, '_> {
             );
             let (canvas, content_height) = flow.finish();
             let content_height = content_height as f32;
-            height = height.max(content_height + cell.vertical_edges());
+            height = height
+                .max(content_height + cell.vertical_edges())
+                .max(cell.min_height());
             laid_out.push((canvas, content_height, width));
+        }
+
+        if let Dimension::Pt(min) = row.style.height {
+            height = height.max(min);
         }
 
         let mut items = Vec::new();

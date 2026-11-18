@@ -4,28 +4,35 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use parley::{
-    Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, InlineBox, InlineBoxKind,
-    Language, Layout, LineHeight as ParleyLineHeight, PositionedLayoutItem, StyleProperty,
-    TextWrapMode, VerticalAlign as ParleyVerticalAlign,
+    Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, IndentOptions, InlineBox,
+    InlineBoxKind, Language, Layout, LineHeight as ParleyLineHeight, PositionedLayoutItem,
+    StyleProperty, TextWrapMode, VerticalAlign as ParleyVerticalAlign,
 };
 use presswork_dom::{Document, NodeId};
 use presswork_style::{
-    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, TextAlign, VerticalAlign,
-    WhiteSpace,
+    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, TextAlign, TextDecorationLine,
+    TextDecorations, TextTransform, VerticalAlign, WhiteSpace,
 };
 use read_fonts::{FontRef, TableProvider};
 
 use super::{Context, Flow, GenericFonts, WebFonts};
-use crate::fragment::{FontData, Glyph, Item, TextRun};
-use crate::geometry::Point;
+use crate::fragment::{Fill, FontData, Glyph, Item, TextRun};
+use crate::geometry::{Point, Rect};
 
-/// The text color, as parley's per-span "brush".
+/// How text is painted, as parley's per-span "brush": its color and the
+/// lines drawn on it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Ink(pub Color);
+pub(crate) struct Ink {
+    pub color: Color,
+    pub decorations: TextDecorations,
+}
 
 impl Default for Ink {
     fn default() -> Self {
-        Ink(Color::BLACK)
+        Ink {
+            color: Color::BLACK,
+            decorations: TextDecorations::NONE,
+        }
     }
 }
 
@@ -37,6 +44,9 @@ pub(super) struct Inline {
     text: String,
     spans: Vec<(Range<usize>, ComputedStyle)>,
     boxes: Vec<InlineObject>,
+    /// The paragraph starts its block container, so `text-indent`
+    /// applies to it.
+    first: bool,
 }
 
 /// An atomic box laid out inline, like a character: an image.
@@ -82,11 +92,21 @@ impl InlineObject {
 }
 
 impl Inline {
+    /// Content that starts a block container: `text-indent` applies to it.
+    /// Taking it with `std::mem::take` leaves content that does not.
+    pub fn first() -> Self {
+        Self {
+            first: true,
+            ..Self::default()
+        }
+    }
+
     /// Appends text, applying the `white-space` rules of `style`.
     pub fn push_text(&mut self, text: &str, style: &ComputedStyle) {
         let white_space = style.white_space;
         let start = self.text.len();
-        let mut chars = text.chars().peekable();
+        let transformed = self.transform(text, style.text_transform);
+        let mut chars = transformed.chars().peekable();
         while let Some(ch) = chars.next() {
             match ch {
                 '\r' if chars.peek() == Some(&'\n') => {}
@@ -113,6 +133,30 @@ impl Inline {
         }
         if self.text.len() > start {
             self.spans.push((start..self.text.len(), style.clone()));
+        }
+    }
+
+    /// Applies `text-transform` to `text`, which follows the text gathered
+    /// so far: a word that `capitalize` capitalizes may have started in an
+    /// earlier span.
+    fn transform(&self, text: &str, transform: TextTransform) -> String {
+        match transform {
+            TextTransform::None => text.to_owned(),
+            TextTransform::Uppercase => text.to_uppercase(),
+            TextTransform::Lowercase => text.to_lowercase(),
+            TextTransform::Capitalize => {
+                let mut in_word = self.text.chars().next_back().is_some_and(is_word_char);
+                let mut out = String::with_capacity(text.len());
+                for ch in text.chars() {
+                    if !in_word && ch.is_alphabetic() {
+                        out.extend(ch.to_uppercase());
+                    } else {
+                        out.push(ch);
+                    }
+                    in_word = is_word_char(ch);
+                }
+                out
+            }
         }
     }
 
@@ -153,12 +197,24 @@ impl Inline {
     }
 }
 
+/// Whether `ch` continues a word for `text-transform: capitalize`.
+fn is_word_char(ch: char) -> bool {
+    // Marks continue the word they attach to (Devanagari vowel signs);
+    // apostrophes keep "don't" one word.
+    ch.is_alphanumeric() || matches!(ch, '\'' | '’') || is_mark(ch)
+}
+
+/// A rough test for combining marks, enough to keep them inside words.
+fn is_mark(ch: char) -> bool {
+    matches!(ch as u32, 0x0300..=0x036F | 0x0900..=0x0903 | 0x093A..=0x094F | 0x0951..=0x0957 | 0x0962..=0x0963)
+}
+
 /// The parley style properties for text with the given computed style.
 fn text_properties<'a>(
     generics: &'a GenericFonts,
     web: &'a WebFonts<'_>,
     style: &'a ComputedStyle,
-) -> [StyleProperty<'a, Ink>; 8] {
+) -> [StyleProperty<'a, Ink>; 10] {
     let language = style.lang.as_deref().and_then(|l| Language::parse(l).ok());
     let line_height = match style.line_height {
         LineHeight::Normal => ParleyLineHeight::MetricsRelative(1.0),
@@ -183,9 +239,14 @@ fn text_properties<'a>(
             FontStyle::Normal
         }),
         StyleProperty::Locale(language),
-        StyleProperty::Brush(Ink(style.color)),
+        StyleProperty::Brush(Ink {
+            color: style.color,
+            decorations: style.text_decorations(),
+        }),
         StyleProperty::LineHeight(line_height),
         StyleProperty::TextWrapMode(wrap),
+        StyleProperty::LetterSpacing(style.letter_spacing),
+        StyleProperty::WordSpacing(style.word_spacing),
     ]
 }
 
@@ -241,6 +302,17 @@ impl Flow<'_, '_> {
         let text: Arc<str> = inline.text.into();
         let boxes = inline.boxes;
         let mut layout = self.cx.shape(&text, style, &inline.spans, &boxes);
+        if inline.first {
+            let indent = style.text_indent;
+            let amount = indent.length.resolve(width).unwrap_or(0.0);
+            if amount != 0.0 {
+                let options = IndentOptions {
+                    each_line: indent.each_line,
+                    hanging: indent.hanging,
+                };
+                layout.set_text_indent(amount, options);
+            }
+        }
 
         if self.is_measuring() {
             let max = layout.calculate_content_widths().max;
@@ -272,14 +344,30 @@ impl Flow<'_, '_> {
             let top = metrics.block_min_coord;
             let mut items = Vec::new();
             let mut cursor = ClusterCursor::default();
-            for item in line.items() {
+            let count = line.items().count();
+            for (position, item) in line.items().enumerate() {
                 match item {
                     PositionedLayoutItem::GlyphRun(run) => {
                         let origin = Point {
                             x: x + run.offset(),
                             y: run.baseline() - top,
                         };
-                        items.push(Item::Text(text_run(&run, origin, &text, &mut cursor)));
+                        let text_run = text_run(&run, origin, &text, &mut cursor);
+                        let decorations = run.style().brush.decorations;
+                        if decorations.is_empty() {
+                            items.push(Item::Text(text_run));
+                            continue;
+                        }
+                        // Lines are not drawn under the spaces that end a line.
+                        let trailing = if position + 1 == count && !run.run().is_rtl() {
+                            trailing_space(&text_run)
+                        } else {
+                            0.0
+                        };
+                        let lines = DecorationLines::new(&run, decorations, top, trailing);
+                        lines.fills(x, UNDER_TEXT, &mut items);
+                        items.push(Item::Text(text_run));
+                        lines.fills(x, OVER_TEXT, &mut items);
                     }
                     PositionedLayoutItem::InlineBox(placed) => {
                         let object = &boxes[placed.id as usize];
@@ -316,8 +404,11 @@ impl Flow<'_, '_> {
         x: f32,
         baseline: f32,
     ) -> Vec<Item> {
+        // Markers are not underlined with the item's text.
         let style = ComputedStyle {
             white_space: WhiteSpace::Pre,
+            text_decoration_line: TextDecorationLine::NONE,
+            inherited_decorations: TextDecorations::NONE,
             ..style.clone()
         };
         let text: Arc<str> = marker.into();
@@ -341,6 +432,107 @@ impl Flow<'_, '_> {
         }
         items
     }
+}
+
+/// The decoration lines of one glyph run, relative to its slice.
+struct DecorationLines {
+    decorations: TextDecorations,
+    /// Left edge, relative to the paragraph's left edge, and length.
+    start: f32,
+    width: f32,
+    /// Tops and thicknesses.
+    underline: (f32, f32),
+    overline: (f32, f32),
+    line_through: (f32, f32),
+}
+
+impl DecorationLines {
+    /// Positions the lines. `top` is the line's top; `trailing` the width
+    /// of spaces at the end of the run that are left undecorated.
+    ///
+    /// Overlines and line-throughs are placed from the ascent of the
+    /// span's primary font, as in Blink, so that they keep one height
+    /// across fallback fonts: Devanagari fonts put their own strikeout
+    /// much higher than Latin ones. Underlines use the run's font, whose
+    /// position agrees closely enough between fonts.
+    fn new(run: &GlyphRun<'_, Ink>, decorations: TextDecorations, top: f32, trailing: f32) -> Self {
+        let metrics = run.run().font_metrics();
+        let font_size = run.run().font_size();
+        // Fonts without the metrics get a line of a typical thickness.
+        let thickness = |size: f32| {
+            if size > 0.0 { size } else { font_size / 16.0 }
+        };
+        let baseline = run.baseline() - top;
+        let under = thickness(metrics.underline_size);
+        // The offset is to the top of the line, upwards from the baseline.
+        let underline_offset = if metrics.underline_offset != 0.0 {
+            metrics.underline_offset
+        } else {
+            -font_size / 10.0
+        };
+        let ascent = match run.span_metrics().ascent {
+            ascent if ascent > 0.0 => ascent,
+            _ => metrics.ascent,
+        };
+        let strike = thickness(metrics.strikethrough_size);
+        Self {
+            decorations,
+            start: run.offset(),
+            width: (run.advance() - trailing).max(0.0),
+            underline: (baseline - underline_offset, under),
+            overline: (baseline - ascent, under),
+            line_through: (baseline - ascent / 3.0 - strike / 2.0, strike),
+        }
+    }
+
+    /// Appends the fills for the lines in `which`, shifted right by `x`.
+    fn fills(&self, x: f32, which: TextDecorationLine, out: &mut Vec<Item>) {
+        let lines = [
+            (which.underline, self.decorations.underline, self.underline),
+            (which.overline, self.decorations.overline, self.overline),
+            (
+                which.line_through,
+                self.decorations.line_through,
+                self.line_through,
+            ),
+        ];
+        for (wanted, color, (y, thickness)) in lines {
+            if let (true, Some(color)) = (wanted, color)
+                && self.width > 0.0
+            {
+                out.push(Item::Fill(Fill {
+                    rect: Rect::new(x + self.start, y, self.width, thickness),
+                    color,
+                }));
+            }
+        }
+    }
+}
+
+/// Paint order: underlines and overlines go below the text, line-through
+/// above it (CSS Text Decoration 3, section 2.1).
+const UNDER_TEXT: TextDecorationLine = TextDecorationLine {
+    underline: true,
+    overline: true,
+    line_through: false,
+};
+const OVER_TEXT: TextDecorationLine = TextDecorationLine {
+    underline: false,
+    overline: false,
+    line_through: true,
+};
+
+/// The advance of the whitespace glyphs at the end of `run`.
+fn trailing_space(run: &TextRun) -> f32 {
+    run.glyphs
+        .iter()
+        .rev()
+        .take_while(|glyph| {
+            let text = &run.text[glyph.text_range.clone()];
+            !text.is_empty() && text.chars().all(char::is_whitespace)
+        })
+        .map(|glyph| glyph.advance)
+        .sum()
 }
 
 /// parley's equivalent of a `vertical-align` value.
@@ -534,7 +726,7 @@ fn text_run(
     TextRun {
         font: shaped.font().clone(),
         font_size: shaped.font_size(),
-        color: run.style().brush.0,
+        color: run.style().brush.color,
         origin,
         glyphs,
         text: Arc::clone(text),

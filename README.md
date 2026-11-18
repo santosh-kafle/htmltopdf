@@ -20,11 +20,17 @@ maintained, and accepts the same command line.
   `:not`, `:is`, attribute selectors, combinators). `@media print` rules
   apply; `@media screen` rules do not. Supported properties:
   - text: `color`, `font-family`, `font-size`, `font-weight`, `font-style`,
-    `font`, `line-height`, `text-align`, `white-space`
+    `font`, `line-height`, `text-align`, `white-space`, `text-indent`,
+    `text-transform`, `letter-spacing`, `word-spacing`
+  - text decoration: `text-decoration` (underline, overline and
+    line-through, drawn solid), `text-decoration-line`,
+    `text-decoration-color`
   - boxes: `display`, `margin`, `padding`, `border` (drawn solid), `width`,
-    `max-width`, `box-sizing`, `background-color`
+    `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
+    `background-color`
   - images: `width`, `height`, `max-width`, `max-height`, `vertical-align`
-  - tables: `border-collapse`, `border-spacing`, `vertical-align`
+  - tables: `border-collapse`, `border-spacing`, `vertical-align`, `height`
+    on cells and rows
   - lists: `list-style-type`
   - pages: `break-before`, `break-after` and the `page-break-*` aliases
   - fonts: `@font-face` with TrueType, OpenType and WOFF files, loaded only
@@ -98,8 +104,8 @@ maintained, and accepts the same command line.
   running it; see below.
 
 Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
-floats and positioning, flexbox and grid, generated content (`::before`), text
-decoration, `height`, row-spanning cells (they occupy their first row only),
+floats and positioning, flexbox and grid, generated content (`::before`),
+row-spanning cells (they occupy their first row only),
 the `[section]` header variables (always empty), and the table of
 contents.
 
@@ -132,6 +138,9 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 - **Standards-based layout.** Output follows the CSS specifications, not
   QtWebKit, so templates tuned for wkhtmltopdf's rendering (for example its
   smart shrinking) may lay out differently.
+- **Boxes grow to fit.** Content taller than a box's `height` makes the box
+  taller instead of overflowing it, so text never runs into what follows.
+  `overflow` is not supported.
 - **Print media.** Stylesheets are evaluated for `print` media, so
   `@media screen` rules do not apply. wkhtmltopdf uses `screen` unless
   `--print-media-type` is given.

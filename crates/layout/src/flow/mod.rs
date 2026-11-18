@@ -418,11 +418,18 @@ impl<'c, 'a> Flow<'c, 'a> {
             return;
         }
         let tracked = self.tracked.is_some_and(|(tracked, _)| tracked == id);
-        let open = self.open_box(style, &geometry, x, tracked);
+        let min_height = geometry.min_content_height(style);
+        let sized = min_height > 0.0 && !self.is_measuring();
+        // A box with a height needs a decoration to know where its content
+        // starts.
+        let open = self.open_box(style, &geometry, x, tracked || sized);
         if tracked && let Some((_, index)) = &mut self.tracked {
             *index = open.decoration;
         }
         self.block_contents(id, style, x + geometry.content_x(), geometry.content_width);
+        if sized && let Some(index) = open.decoration {
+            self.extend_to(index, geometry.top_edge(), min_height);
+        }
         self.close_box(style, &geometry, open);
     }
 
@@ -472,6 +479,23 @@ impl<'c, 'a> Flow<'c, 'a> {
         OpenBox { decoration }
     }
 
+    /// Makes the content of the box whose decoration is `index` at least
+    /// `height` tall, with an empty slice below the content if it falls
+    /// short. The slice keeps the space together on one page, and moves an
+    /// empty box (a signature field) to the next page whole if it does
+    /// not fit.
+    fn extend_to(&mut self, index: usize, top_edge: f32, height: f32) {
+        // The last child's bottom margin stays inside a box with a height.
+        // Settling also places a box that is still empty.
+        self.settle_margin();
+        let content_top = self.canvas.decorations[index].top + f64::from(top_edge);
+        let missing = content_top + f64::from(height) - self.y;
+        if missing > 0.0 {
+            self.push_slice(self.y, missing as f32, Vec::new());
+            self.y += missing;
+        }
+    }
+
     /// Ends a box: bottom padding, border and margin.
     fn close_box(&mut self, style: &ComputedStyle, geometry: &BoxGeometry, open: OpenBox) {
         if geometry.bottom_edge() > 0.0 {
@@ -499,7 +523,7 @@ impl<'c, 'a> Flow<'c, 'a> {
         if style.display == Display::ListItem {
             self.marker = inline::list_marker(self.cx.doc, id, style);
         }
-        let mut inline = Inline::default();
+        let mut inline = Inline::first();
         self.children(id, style, x, width, &mut inline);
         self.paragraph(inline, style, x, width);
         // An item without text has nowhere to put its marker.

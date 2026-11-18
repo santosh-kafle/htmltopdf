@@ -68,10 +68,12 @@ pub(crate) fn presentational_hints(
     {
         hints.push(D::Width(width));
     }
+    if matches!(name, "img" | "td" | "th" | "tr")
+        && let Some(height) = element.attr("height").and_then(parse_dimension)
+    {
+        hints.push(D::Height(height));
+    }
     if name == "img" {
-        if let Some(height) = element.attr("height").and_then(parse_dimension) {
-            hints.push(D::Height(height));
-        }
         // `border="0"` is common in old templates and means none.
         if let Some(width) = element.attr("border").and_then(parse_pixels)
             && width > 0.0
@@ -276,6 +278,10 @@ mod tests {
         assert_eq!(
             hints("<table><tr><td width=120>", "td"),
             [D::Width(Dim::Length(Length::Pt(90.0)))]
+        );
+        assert_eq!(
+            hints("<table><tr height=40><td>", "tr"),
+            [D::Height(Dim::Length(Length::Pt(30.0)))]
         );
     }
 

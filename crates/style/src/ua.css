@@ -40,7 +40,9 @@ pre, listing, xmp, plaintext { white-space: pre; }
 small { font-size: smaller; }
 big { font-size: larger; }
 sub, sup { font-size: smaller; }
-a:link { color: #0000ee; }
+a:link { color: #0000ee; text-decoration: underline; }
+u, ins { text-decoration: underline; }
+s, strike, del { text-decoration: line-through; }
 nobr { white-space: nowrap; }
 
 /* Lists */

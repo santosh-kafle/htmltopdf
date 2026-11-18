@@ -119,6 +119,28 @@ impl BoxGeometry {
         self.margin.left + self.margin.right + self.border_box_width() - self.content_width
     }
 
+    /// The least height of the content box that `height`, `min-height`
+    /// and `max-height` ask for, in points; zero if none of them does.
+    ///
+    /// A block is never cut shorter than its content: the result is a
+    /// minimum, and taller content makes the box grow rather than
+    /// overflow. Percentages count as `auto`, as no containing block has a
+    /// definite height.
+    pub fn min_content_height(&self, style: &ComputedStyle) -> f32 {
+        let edges = self.top_edge() + self.bottom_edge();
+        let content = |value: Dimension| match value {
+            Dimension::Pt(size) => Some(match style.box_sizing {
+                BoxSizing::ContentBox => size,
+                BoxSizing::BorderBox => (size - edges).max(0.0),
+            }),
+            Dimension::Auto | Dimension::Percent(_) => None,
+        };
+        let max = content(style.max_height).unwrap_or(f32::INFINITY);
+        let height = content(style.height).map_or(0.0, |height| height.min(max));
+        // `min-height` wins over `max-height`.
+        height.max(content(style.min_height).unwrap_or(0.0))
+    }
+
     pub fn top_edge(&self) -> f32 {
         self.border.top + self.padding.top
     }
@@ -192,6 +214,26 @@ mod tests {
         // A narrower width is left alone.
         s.width = Dimension::Pt(100.0);
         assert_eq!(BoxGeometry::resolve(&s, 300.0, None).content_width, 100.0);
+    }
+
+    #[test]
+    fn heights_are_minimums_capped_by_max_height() {
+        let mut s = style();
+        s.padding.top = Dimension::Pt(5.0);
+        s.padding.bottom = Dimension::Pt(5.0);
+        let g = |s: &ComputedStyle| BoxGeometry::resolve(s, 300.0, None).min_content_height(s);
+        assert_eq!(g(&s), 0.0);
+        s.height = Dimension::Pt(50.0);
+        assert_eq!(g(&s), 50.0);
+        s.box_sizing = BoxSizing::BorderBox;
+        assert_eq!(g(&s), 40.0);
+        s.max_height = Dimension::Pt(30.0);
+        assert_eq!(g(&s), 20.0);
+        s.min_height = Dimension::Pt(60.0);
+        assert_eq!(g(&s), 50.0);
+        s.height = Dimension::Percent(1.0);
+        s.min_height = Dimension::Auto;
+        assert_eq!(g(&s), 0.0);
     }
 
     #[test]

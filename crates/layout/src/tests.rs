@@ -785,3 +785,200 @@ fn ligatures_map_to_all_their_characters() {
     // ligatures: an fi ligature's glyph stands for both letters.
     assert_eq!(texts.concat(), "fixtures office", "{texts:?}");
 }
+
+/// The index in paint order of the first item matching `f`.
+fn paint_index(page: &Page, f: impl Fn(&Item) -> bool) -> usize {
+    page.items.iter().position(f).expect("item is painted")
+}
+
+#[test]
+fn underlines_sit_below_the_baseline_and_paint_under_the_text() {
+    let pages = layout("<body style='margin:0'><p><u>Total due</u> now</p>");
+    let page = &pages[0];
+    let total = run_with(page, "Total");
+    let lines = fills(page);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = lines[0].rect;
+    assert_eq!(lines[0].color, Color::BLACK);
+    assert!(line.origin.y > total.origin.y, "below the baseline");
+    assert!(line.origin.y < total.origin.y + total.font_size * 0.3);
+    assert!(line.size.height > 0.2 && line.size.height < 2.0, "{line:?}");
+    assert!(approx(line.origin.x, total.origin.x));
+    // Only under the underlined words, not the space after them.
+    assert!(approx(line.origin.x + line.size.width, right_edge(total)));
+    let fill = paint_index(page, |item| matches!(item, Item::Fill(_)));
+    let text = paint_index(page, |item| matches!(item, Item::Text(_)));
+    assert!(fill < text, "underline painted first");
+}
+
+#[test]
+fn decorations_reach_descendants_in_the_decorating_color() {
+    let pages = layout(
+        "<body style='margin:0'><p style='color:red; text-decoration:line-through'>Old
+         <span style='color:black; text-decoration:none'>price</span></p>",
+    );
+    let page = &pages[0];
+    let lines = fills(page);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let price = run_with(page, "price");
+    assert_eq!(price.color, Color::BLACK);
+    for line in &lines {
+        assert_eq!(line.color, RED);
+        assert!(line.rect.origin.y < price.origin.y, "through the text");
+        assert!(line.rect.origin.y > price.origin.y - price.font_size * 0.6);
+    }
+    let text = paint_index(page, |item| matches!(item, Item::Text(_)));
+    let fill = paint_index(page, |item| matches!(item, Item::Fill(_)));
+    assert!(text < fill, "line-through painted over the text");
+}
+
+#[test]
+fn underlines_skip_the_spaces_that_end_a_line() {
+    let pages = layout("<body style='margin:0'><div style='width:60pt'><u>aaaa bbbb cccc</u>");
+    let page = &pages[0];
+    let lines = fills(page);
+    let runs = runs(page);
+    assert_eq!(lines.len(), runs.len());
+    for (line, run) in lines.iter().zip(runs) {
+        let word_end = run
+            .glyphs
+            .iter()
+            .rposition(|g| !run.text[g.text_range.clone()].trim().is_empty())
+            .unwrap()
+            + 1;
+        let width: f32 = run.glyphs[..word_end].iter().map(|g| g.advance).sum();
+        assert!(approx(line.rect.size.width, width), "{line:?} {run:?}");
+    }
+}
+
+#[test]
+fn links_are_underlined_and_list_markers_are_not() {
+    let pages = layout(
+        "<body style='margin:0'><p><a href='https://example.com'>site</a></p>
+         <ul><li style='text-decoration:underline'>Item</li></ul>",
+    );
+    let page = &pages[0];
+    let lines = fills(page);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0].color, Color::rgb(0, 0, 0xee));
+    let item = run_with(page, "Item");
+    assert!(
+        approx(lines[1].rect.origin.x, item.origin.x),
+        "not under the marker"
+    );
+}
+
+#[test]
+fn letter_and_word_spacing_widen_text() {
+    let width = |style: &str| {
+        let pages = layout(&format!(
+            "<body style='margin:0'><p style='{style}'>ab cd</p>"
+        ));
+        let runs = runs(&pages[0]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].covered_text(), "ab cd");
+        right_edge(runs[0]) - runs[0].origin.x
+    };
+    let plain = width("");
+    // After each of the five characters.
+    assert!(approx(width("letter-spacing: 2pt") - plain, 10.0));
+    assert!(approx(width("word-spacing: 0.5em") - plain, 6.0));
+}
+
+#[test]
+fn text_indent_moves_the_first_line_of_each_block() {
+    let text = "word ".repeat(30);
+    let pages = layout(&format!(
+        "<body style='margin:0'>
+         <div style='width:200pt; text-indent:10%'>{text}<p>para</p>tail</div>
+         <div style='width:200pt; text-indent:20pt hanging'>{text}</div>"
+    ));
+    let page = &pages[0];
+    let runs = runs(page);
+    let first_line_y = runs[0].origin.y;
+    let starts: Vec<(f32, f32)> = runs.iter().map(|r| (r.origin.x - M, r.origin.y)).collect();
+    // The first line of the first block, then its continuation lines.
+    assert!(approx(starts[0].0, 20.0), "{starts:?}");
+    let second = starts.iter().find(|(_, y)| *y > first_line_y).unwrap();
+    assert!(approx(second.0, 0.0));
+    // The paragraph inherits the indent; the text after it is not a
+    // first line.
+    assert!(approx(run_with(page, "para").origin.x - M, 20.0));
+    assert!(approx(run_with(page, "tail").origin.x - M, 0.0));
+    // Hanging: all lines but the first.
+    let tail_y = run_with(page, "tail").origin.y;
+    let hanging: Vec<_> = starts.iter().filter(|(_, y)| *y > tail_y).collect();
+    assert!(approx(hanging[0].0, 0.0), "{hanging:?}");
+    assert!(hanging[1..].iter().all(|(x, _)| approx(*x, 20.0)));
+}
+
+#[test]
+fn text_transform_changes_the_text() {
+    let text = |html: &str| {
+        let pages = layout(html);
+        runs(&pages[0])
+            .iter()
+            .map(|run| run.covered_text())
+            .collect::<String>()
+    };
+    assert_eq!(
+        text("<p style='text-transform:uppercase'>straße</p>"),
+        "STRASSE"
+    );
+    assert_eq!(
+        text("<p style='text-transform:capitalize'>hello <b>wor</b>ld don't नमस्ते</p>"),
+        "Hello World Don't नमस्ते"
+    );
+    assert_eq!(text("<p style='text-transform:lowercase'>ABC</p>"), "abc");
+}
+
+#[test]
+fn heights_make_blocks_taller_but_never_cut_content() {
+    let pages = layout(
+        "<body style='margin:0'>
+         <div style='height:100pt; background:red'>x</div><p style='margin:0'>after</p>
+         <div style='height:5pt; background:blue'>grows</div>
+         <div style='min-height:40pt; padding:10pt; box-sizing:border-box; background:red'></div>",
+    );
+    let page = &pages[0];
+    let boxes = fills(page);
+    assert_eq!(boxes.len(), 3, "{boxes:?}");
+    assert!(approx(boxes[0].rect.size.height, 100.0));
+    let after = run_with(page, "after");
+    assert!(after.origin.y > M + 100.0 && after.origin.y < M + 100.0 + 1.5 * after.font_size);
+    let grows = run_with(page, "grows");
+    assert!(boxes[1].rect.size.height > grows.font_size);
+    // Border-box sizing counts the padding; an empty box keeps its height.
+    assert!(approx(boxes[2].rect.size.height, 40.0));
+}
+
+#[test]
+fn a_fixed_height_box_that_does_not_fit_moves_to_the_next_page() {
+    let pages = layout(
+        "<body style='margin:0'><div style='height:700pt'></div>
+         <div style='height:200pt; background:red'></div>",
+    );
+    assert_eq!(pages.len(), 2);
+    assert_eq!(fills(&pages[0]), []);
+    let signature = fills(&pages[1]);
+    assert_eq!(signature.len(), 1);
+    assert!(approx(signature[0].rect.origin.y, M));
+    assert!(approx(signature[0].rect.size.height, 200.0));
+}
+
+#[test]
+fn table_cells_and_rows_take_height_as_a_minimum() {
+    let pages = layout(
+        "<body style='margin:0'><table cellspacing=0 cellpadding=0>
+         <tr><td height=80 style='background:red'>a</td><td>b</td></tr>
+         <tr style='height:50pt'><td style='background:red'>c</td></tr>
+         <tr><td style='height:2pt; background:red'>tall content</td></tr></table>",
+    );
+    let page = &pages[0];
+    let cells = fills(page);
+    assert_eq!(cells.len(), 3);
+    // 80px is 60pt.
+    assert!(approx(cells[0].rect.size.height, 60.0), "{cells:?}");
+    assert!(approx(cells[1].rect.size.height, 50.0));
+    assert!(cells[2].rect.size.height > run_with(page, "tall").font_size);
+}

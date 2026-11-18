@@ -22,10 +22,11 @@ pub mod stylesheet;
 pub mod values;
 
 pub use cascade::Stylist;
-pub use computed::{BorderSide, ComputedStyle, DEFAULT_FONT_SIZE};
+pub use computed::{BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, TextDecorations, TextIndent};
 pub use properties::{
     BorderCollapse, BorderStyle, BoxSizing, Break, Display, FontFamilyName, GenericFamily,
-    LineHeight, ListStyleType, TextAlign, VerticalAlign, WhiteSpace,
+    LineHeight, ListStyleType, TextAlign, TextDecorationLine, TextTransform, VerticalAlign,
+    WhiteSpace,
 };
 pub use stylesheet::{PageRule, PageSizeValue};
 pub use values::{Color, Dimension, Length, Side, Sides};
