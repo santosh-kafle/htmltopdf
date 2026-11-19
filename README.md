@@ -32,7 +32,8 @@ maintained, and accepts the same command line.
   - tables: `border-collapse`, `border-spacing`, `vertical-align`, `height`
     on cells and rows
   - lists: `list-style-type`
-  - pages: `break-before`, `break-after` and the `page-break-*` aliases
+  - pages: `break-before`, `break-after`, `break-inside` (`page` and
+    `avoid`) and the `page-break-*` aliases, `orphans`, `widows`
   - fonts: `@font-face` with TrueType, OpenType and WOFF files, loaded only
     when text uses them
 - **Legacy HTML attributes** that wkhtmltopdf-era templates rely on:
@@ -48,9 +49,13 @@ maintained, and accepts the same command line.
   for standard input), and inside a stylesheet against the stylesheet.
 - **Tables.** Columns are sized to their content, with `colspan`, cell
   borders and backgrounds, and collapsed borders. Rows are never split
-  across pages, and `<thead>` rows repeat at the top of every page.
+  across pages, `<thead>` rows repeat at the top of every page, and a
+  header is never left alone at the bottom of a page.
 - **Pagination.** Pages break between lines and table rows; backgrounds and
   borders continue across the break. `@page { size; margin }` is honored.
+  A box with `break-inside: avoid` moves to the next page whole when it
+  fits there, headings stay with the content that follows them, and
+  paragraphs leave at least two lines on each page.
 - **Text in any script the system has fonts for.** Text is shaped with
   HarfBuzz-compatible shaping, so Devanagari conjuncts and vowel signs render
   correctly, and fonts fall back by script. Fonts are embedded and subsetted,
@@ -141,6 +146,11 @@ cat invoice.html | presswork --quiet - - > invoice.pdf
 - **Boxes grow to fit.** Content taller than a box's `height` makes the box
   taller instead of overflowing it, so text never runs into what follows.
   `overflow` is not supported.
+- **Page breaks.** wkhtmltopdf ignores `orphans` and `widows` and can cut
+  a line of text in half at a page break. presswork never splits a line,
+  keeps at least two lines of a paragraph on each page (the CSS default),
+  and keeps headings with what follows them, as print formatters do, so
+  pages may break a little earlier than in wkhtmltopdf.
 - **Print media.** Stylesheets are evaluated for `print` media, so
   `@media screen` rules do not apply. wkhtmltopdf uses `screen` unless
   `--print-media-type` is given.

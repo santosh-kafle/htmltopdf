@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use presswork_style::Side;
 
-use crate::flow::{Canvas, RepeatedHeader};
+use crate::flow::{Canvas, RepeatedHeader, Slice};
 use crate::fragment::{Item, Page};
 use crate::geometry::{EdgeSizes, Rect, Size};
 
@@ -27,7 +27,8 @@ const MAX_HEADER_FRACTION: f32 = 0.5;
 ///
 /// A slice that does not fit on the current page starts a new one, unless
 /// it is the first on its page (it is then too tall for any page and is
-/// left to overflow). The space before a slice that starts a page is
+/// left to overflow). Slices kept together (see [`Keep`](crate::flow::Keep)) move to the next
+/// page as a group. The space before a slice that starts a page is
 /// dropped, so margins do not carry over a page break. Backgrounds and
 /// borders are split where the page breaks fall.
 pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Page> {
@@ -39,16 +40,13 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
         content: Vec::new(),
     };
 
+    let mut starts = page_starts(&canvas.slices, available)
+        .into_iter()
+        .peekable();
     let mut sheets = vec![sheet(0.0, 0.0)];
-    let mut empty = true;
-    for slice in canvas.slices {
-        let current = sheets.last().expect("at least one page");
-        let bottom = (slice.top - current.offset) as f32 + current.header + slice.height;
-        if !empty && (slice.break_before || bottom > available) {
-            let header: Option<Rc<RepeatedHeader>> = slice
-                .header
-                .clone()
-                .filter(|header| header.height <= available * MAX_HEADER_FRACTION);
+    for (index, slice) in canvas.slices.into_iter().enumerate() {
+        if starts.next_if_eq(&index).is_some() {
+            let header = repeated_header(&slice, available);
             let mut next = sheet(slice.top, header.as_ref().map_or(0.0, |h| h.height));
             if let Some(header) = header {
                 next.content.extend(
@@ -69,7 +67,6 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
                 .into_iter()
                 .map(|item| item.translate(margins.left, y)),
         );
-        empty = false;
     }
 
     // Split each decoration across the pages it spans.
@@ -114,10 +111,89 @@ pub(crate) fn paginate(canvas: Canvas, size: Size, margins: EdgeSizes) -> Vec<Pa
         .collect()
 }
 
+/// The table header to repeat above `slice` when it starts a page, unless
+/// it would take too much of the page.
+fn repeated_header(slice: &Slice, available: f32) -> Option<Rc<RepeatedHeader>> {
+    slice
+        .header
+        .clone()
+        .filter(|header| header.height <= available * MAX_HEADER_FRACTION)
+}
+
+/// The indices of the slices that start a page, after the first page.
+///
+/// When a slice does not fit, the page breaks before the group of slices
+/// it is kept with. A group that cannot fit on any page (it already starts
+/// this one, or is taller than a page) first gives up its [`Keep::inside`](crate::flow::Keep::inside)
+/// links (a box with `break-inside: avoid` taller than a page), and then
+/// the page breaks right before the slice that does not fit. Forced breaks
+/// always happen.
+fn page_starts(slices: &[Slice], available: f32) -> Vec<usize> {
+    let mut starts = Vec::new();
+    // The first slice on the current page, the canvas position at the top
+    // of its content, and the height of the header repeated above it.
+    let (mut first, mut offset, mut header) = (0, 0.0, 0.0);
+    let mut index = 0;
+    while index < slices.len() {
+        let slice = &slices[index];
+        // The first slice on a page stays, even if it does not fit.
+        if index > first {
+            let bottom = (slice.top - offset) as f32 + header + slice.height;
+            if slice.break_before || bottom > available {
+                let start = if slice.break_before {
+                    index
+                } else {
+                    group_start(slices, index, first, true, available)
+                        .or_else(|| group_start(slices, index, first, false, available))
+                        .unwrap_or(index)
+                };
+                starts.push(start);
+                first = start;
+                offset = slices[start].top;
+                header = repeated_header(&slices[start], available).map_or(0.0, |h| h.height);
+                // Lay out the moved slices again on the new page.
+                index = start;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    starts
+}
+
+/// The first slice of the group `index` is kept with, if moving the group
+/// to a new page helps: the group starts after `first`, the first slice
+/// on the current page, and fits on a page. `inside` says whether to
+/// honor [`Keep::inside`](crate::flow::Keep::inside) links.
+fn group_start(
+    slices: &[Slice],
+    index: usize,
+    first: usize,
+    inside: bool,
+    available: f32,
+) -> Option<usize> {
+    let kept =
+        |slice: &Slice| !slice.break_before && (slice.keep.tight || (inside && slice.keep.inside));
+    let mut start = index;
+    while start > first && kept(&slices[start]) {
+        start -= 1;
+    }
+    if start == first {
+        return None;
+    }
+    let mut end = index;
+    while slices.get(end + 1).is_some_and(kept) {
+        end += 1;
+    }
+    let header = repeated_header(&slices[start], available).map_or(0.0, |h| h.height);
+    let height = (slices[end].top - slices[start].top) as f32 + slices[end].height + header;
+    (height <= available).then_some(start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::{BoxPaint, Decoration, Slice};
+    use crate::flow::{BoxPaint, Decoration, Keep};
     use crate::fragment::Fill;
     use presswork_style::Color;
 
@@ -132,6 +208,7 @@ mod tests {
                 color: Color::BLACK,
             })],
             break_before: false,
+            keep: Keep::default(),
             header: None,
         }
     }
@@ -175,6 +252,89 @@ mod tests {
         assert_eq!(tops(&pages[0]), [10.0, 60.0]);
         // The gap before the third slice is dropped at the page break.
         assert_eq!(tops(&pages[1]), [10.0]);
+    }
+
+    /// Slices `height` tall, one after the other from the top; `keep` says
+    /// which ones are kept with the slice before.
+    fn kept(height: f32, keep: &[Keep]) -> Canvas {
+        canvas(
+            keep.iter()
+                .enumerate()
+                .map(|(i, &keep)| Slice {
+                    keep,
+                    ..slice(i as f64 * f64::from(height), height)
+                })
+                .collect(),
+        )
+    }
+
+    const FREE: Keep = Keep {
+        tight: false,
+        inside: false,
+    };
+    const TIGHT: Keep = Keep {
+        tight: true,
+        inside: false,
+    };
+    const INSIDE: Keep = Keep {
+        tight: false,
+        inside: true,
+    };
+
+    /// The number of slices on each page.
+    fn per_page(pages: &[Page]) -> Vec<usize> {
+        pages.iter().map(|page| fills(page).len()).collect()
+    }
+
+    #[test]
+    fn kept_slices_move_to_the_next_page_together() {
+        // 100pt per page: 30pt slices fit three to a page, but the fourth
+        // is kept with the third.
+        let pages = paginate(kept(30.0, &[FREE, FREE, FREE, TIGHT]), SIZE, MARGINS);
+        assert_eq!(per_page(&pages), [2, 2]);
+        assert_eq!(tops(&pages[1]), [10.0, 40.0]);
+    }
+
+    #[test]
+    fn a_group_taller_than_a_page_breaks_where_it_must() {
+        let pages = paginate(
+            kept(30.0, &[FREE, TIGHT, TIGHT, TIGHT, TIGHT]),
+            SIZE,
+            MARGINS,
+        );
+        assert_eq!(per_page(&pages), [3, 2]);
+    }
+
+    #[test]
+    fn an_avoid_box_taller_than_a_page_still_keeps_its_lines_together() {
+        // A box with break-inside: avoid over six slices, too tall for any
+        // page, so it does not move; slices 2 and 3 are also kept tightly
+        // (the last lines of a paragraph inside it).
+        let both = Keep {
+            tight: true,
+            inside: true,
+        };
+        let pages = paginate(
+            kept(30.0, &[FREE, INSIDE, INSIDE, both, INSIDE, INSIDE]),
+            SIZE,
+            MARGINS,
+        );
+        // The box splits, but not between slices 2 and 3.
+        assert_eq!(per_page(&pages), [2, 3, 1]);
+    }
+
+    #[test]
+    fn an_avoid_box_that_fits_moves_whole() {
+        let pages = paginate(kept(30.0, &[FREE, FREE, FREE, INSIDE]), SIZE, MARGINS);
+        assert_eq!(per_page(&pages), [2, 2]);
+    }
+
+    #[test]
+    fn forced_breaks_beat_keeps() {
+        let mut content = kept(10.0, &[FREE, TIGHT, TIGHT]);
+        content.slices[1].break_before = true;
+        let pages = paginate(content, SIZE, MARGINS);
+        assert_eq!(per_page(&pages), [1, 2]);
     }
 
     #[test]

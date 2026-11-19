@@ -188,6 +188,14 @@ keyword_enum! {
 }
 
 keyword_enum! {
+    /// `break-inside` (and the legacy `page-break-inside`).
+    BreakInside {
+        Auto = "auto",
+        Avoid = "avoid" | "avoid-page" | "avoid-column",
+    }
+}
+
+keyword_enum! {
     BorderCollapse {
         Separate = "separate",
         Collapse = "collapse",
@@ -320,6 +328,9 @@ pub enum LonghandId {
     TextTransform,
     LetterSpacing,
     WordSpacing,
+    BreakInside,
+    Orphans,
+    Widows,
 }
 
 impl LonghandId {
@@ -329,11 +340,11 @@ impl LonghandId {
         match self {
             Color | FontFamily | FontSize | FontWeight | FontStyle | LineHeight | TextAlign
             | WhiteSpace | BorderCollapse | BorderSpacing | ListStyleType | TextIndent
-            | TextTransform | LetterSpacing | WordSpacing => true,
+            | TextTransform | LetterSpacing | WordSpacing | Orphans | Widows => true,
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
-            | TextDecorationLine | TextDecorationColor => false,
+            | TextDecorationLine | TextDecorationColor | BreakInside => false,
         }
     }
 
@@ -369,6 +380,9 @@ impl LonghandId {
             TextTransform,
             LetterSpacing,
             WordSpacing,
+            BreakInside,
+            Orphans,
+            Widows,
         ];
         let sided = Side::ALL.into_iter().flat_map(|side| {
             [
@@ -426,6 +440,11 @@ pub enum PropertyDeclaration {
     LetterSpacing(Length),
     /// `normal` is zero.
     WordSpacing(Length),
+    BreakInside(BreakInside),
+    /// At least 1.
+    Orphans(u32),
+    /// At least 1.
+    Widows(u32),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -468,6 +487,9 @@ impl PropertyDeclaration {
             D::TextTransform(_) => LonghandId::TextTransform,
             D::LetterSpacing(_) => LonghandId::LetterSpacing,
             D::WordSpacing(_) => LonghandId::WordSpacing,
+            D::BreakInside(_) => LonghandId::BreakInside,
+            D::Orphans(_) => LonghandId::Orphans,
+            D::Widows(_) => LonghandId::Widows,
             D::CssWide(id, _) => *id,
         }
     }
@@ -525,6 +547,9 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "list-style-type" | "list-style" => one(L::ListStyleType),
         "break-before" | "page-break-before" => one(L::BreakBefore),
         "break-after" | "page-break-after" => one(L::BreakAfter),
+        "break-inside" | "page-break-inside" => one(L::BreakInside),
+        "orphans" => one(L::Orphans),
+        "widows" => one(L::Widows),
         "min-height" => one(L::MinHeight),
         "text-decoration-line" => one(L::TextDecorationLine),
         "text-decoration-color" => one(L::TextDecorationColor),
@@ -662,6 +687,9 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::TextTransform => D::TextTransform(TextTransform::parse(input)?),
         L::LetterSpacing => D::LetterSpacing(parse_spacing(input)?),
         L::WordSpacing => D::WordSpacing(parse_spacing(input)?),
+        L::BreakInside => D::BreakInside(BreakInside::parse(input)?),
+        L::Orphans => D::Orphans(parse_line_count(input)?),
+        L::Widows => D::Widows(parse_line_count(input)?),
     })
 }
 
@@ -1052,6 +1080,15 @@ fn parse_spacing(input: &mut Parser<'_>) -> Parsed<Length> {
     Length::parse(input)
 }
 
+/// `orphans` / `widows`: a positive integer.
+fn parse_line_count(input: &mut Parser<'_>) -> Parsed<u32> {
+    let count = input.expect_integer().map_err(Invalid::from)?;
+    u32::try_from(count)
+        .ok()
+        .filter(|&count| count >= 1)
+        .ok_or(Invalid)
+}
+
 /// `list-style`: only the marker type is used.
 fn parse_list_style(input: &mut Parser<'_>) -> ListStyleType {
     let mut style = ListStyleType::Disc;
@@ -1203,6 +1240,22 @@ mod tests {
     }
 
     #[test]
+    fn break_inside_orphans_and_widows() {
+        assert_eq!(
+            parse("page-break-inside", "avoid"),
+            Ok(vec![D::BreakInside(BreakInside::Avoid)])
+        );
+        assert_eq!(
+            parse("break-inside", "avoid-page"),
+            Ok(vec![D::BreakInside(BreakInside::Avoid)])
+        );
+        assert!(parse("break-inside", "page").is_err());
+        assert_eq!(parse("orphans", "3"), Ok(vec![D::Orphans(3)]));
+        assert!(parse("widows", "0").is_err());
+        assert!(parse("widows", "1.5").is_err());
+    }
+
+    #[test]
     fn sizes_and_vertical_align() {
         assert_eq!(parse("max-width", "none"), Ok(vec![D::MaxWidth(Dim::Auto)]));
         assert_eq!(
@@ -1286,6 +1339,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 28 + 4 * 5);
+        assert_eq!(all.len(), 31 + 4 * 5);
     }
 }

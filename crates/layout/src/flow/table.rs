@@ -218,6 +218,12 @@ impl Flow<'_, '_> {
             }
 
             self.push_slice(self.y, height, items);
+            // Header rows stay together and with the first row after them,
+            // so that a header is never alone at the bottom of a page.
+            let after_header = index > 0 && rows[index - 1].header;
+            if after_header {
+                self.keep_last_slice();
+            }
             if !row.header
                 && let Some(slice) = self.canvas.slices.last_mut()
             {

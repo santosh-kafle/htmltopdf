@@ -982,3 +982,107 @@ fn table_cells_and_rows_take_height_as_a_minimum() {
     assert!(approx(cells[1].rect.size.height, 50.0));
     assert!(cells[2].rect.size.height > run_with(page, "tall").font_size);
 }
+
+/// The index of the page `word` is on.
+fn page_of(pages: &[Page], word: &str) -> usize {
+    pages
+        .iter()
+        .position(|page| words(page).contains(&word))
+        .unwrap_or_else(|| panic!("no page has {word:?}"))
+}
+
+/// Line metrics of the default font: the distance between baselines and
+/// from the top of a line to its baseline.
+fn line_metrics() -> (f32, f32) {
+    let pages = layout("<body style='margin:0'><p style='margin:0'>a<br>b</p>");
+    let (a, b) = (run_with(&pages[0], "a"), run_with(&pages[0], "b"));
+    (b.origin.y - a.origin.y, a.origin.y - M)
+}
+
+/// The page content height with the default options.
+fn available() -> f32 {
+    let size = LayoutOptions::default().page_size;
+    size.height - 2.0 * M
+}
+
+/// Lays out `content` below an empty block that leaves `room` points at
+/// the bottom of the first page.
+fn below_filler(room: f32, content: &str) -> Vec<Page> {
+    layout(&format!(
+        "<body style='margin:0'><div style='height:{}pt'></div>{content}",
+        available() - room
+    ))
+}
+
+const FOUR_LINES: &str = "l1<br>l2<br>l3<br>l4</p>";
+
+#[test]
+fn widows_carry_at_least_two_lines_to_the_next_page() {
+    let (pitch, _) = line_metrics();
+    // Room for three of the four lines.
+    let room = 3.5 * pitch;
+    let pages = below_filler(room, &format!("<p style='margin:0'>{FOUR_LINES}"));
+    assert_eq!(page_of(&pages, "l2"), 0);
+    assert_eq!(page_of(&pages, "l3"), 1);
+    let pages = below_filler(room, &format!("<p style='margin:0; widows:1'>{FOUR_LINES}"));
+    assert_eq!(page_of(&pages, "l3"), 0);
+    assert_eq!(page_of(&pages, "l4"), 1);
+}
+
+#[test]
+fn orphans_leave_at_least_two_lines_or_none() {
+    let (pitch, _) = line_metrics();
+    // Room for one line.
+    let room = 1.5 * pitch;
+    let pages = below_filler(room, &format!("<p style='margin:0'>{FOUR_LINES}"));
+    assert_eq!(page_of(&pages, "l1"), 1);
+    let pages = below_filler(
+        room,
+        &format!("<p style='margin:0; orphans:1'>{FOUR_LINES}"),
+    );
+    assert_eq!(page_of(&pages, "l1"), 0);
+}
+
+#[test]
+fn break_inside_avoid_moves_a_box_to_the_next_page_whole() {
+    let (pitch, _) = line_metrics();
+    let lines = "<p style='margin:0; orphans:1; widows:1'>l1<br>l2<br>l3</p>";
+    let room = 1.5 * pitch;
+    let pages = below_filler(
+        room,
+        &format!("<div style='page-break-inside:avoid'>{lines}</div>"),
+    );
+    assert_eq!(page_of(&pages, "l1"), 1);
+    let pages = below_filler(room, &format!("<div>{lines}</div>"));
+    assert_eq!(page_of(&pages, "l1"), 0);
+}
+
+#[test]
+fn headings_stay_with_what_follows_them() {
+    let (pitch, ascent) = line_metrics();
+    let content = "<h2 style='margin:0'>Terms</h2><p style='margin:0'>text</p>";
+    let alone = layout(&format!("<body style='margin:0'>{content}"));
+    let heading_height = run_with(&alone[0], "text").origin.y - ascent - M;
+    // Room for the heading but not the paragraph.
+    let room = heading_height + 0.5 * pitch;
+    let pages = below_filler(room, content);
+    assert_eq!(page_of(&pages, "Terms"), 1);
+    let pages = below_filler(
+        room,
+        &content.replace("margin:0'", "margin:0; break-after:auto'"),
+    );
+    assert_eq!(page_of(&pages, "Terms"), 0);
+}
+
+#[test]
+fn table_header_rows_are_not_left_alone_at_a_page_bottom() {
+    let rows = "<tr><td style='height:20pt'>row</td></tr>".repeat(3);
+    let table = format!(
+        "<table cellspacing=0 cellpadding=0><thead><tr><th style='height:20pt'>Head</th></tr>
+         </thead>{rows}</table>"
+    );
+    // Room for the header row only.
+    let pages = below_filler(30.0, &table);
+    assert_eq!(page_of(&pages, "Head"), 1);
+    assert_eq!(words(&pages[1]).iter().filter(|w| **w == "Head").count(), 1);
+}

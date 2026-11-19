@@ -37,7 +37,9 @@ use std::sync::Arc;
 use parley::{FontContext, LayoutContext};
 use presswork_dom::resource::{Fetcher, LoadError};
 use presswork_dom::{Document, NodeId, NodeKind};
-use presswork_style::{Break, Color, ComputedStyle, Dimension, Display, Side, Stylist};
+use presswork_style::{
+    Break, BreakInside, Color, ComputedStyle, Dimension, Display, Side, Stylist,
+};
 
 use crate::fragment::{Fill, ImageData, Item};
 use crate::geometry::Rect;
@@ -59,8 +61,24 @@ pub(crate) struct Slice {
     pub items: Vec<Item>,
     /// The slice must start a new page.
     pub break_before: bool,
+    /// The slice should stay on the page of the slice before it.
+    pub keep: Keep,
     /// Table header to repeat above this slice when it starts a page.
     pub header: Option<Rc<RepeatedHeader>>,
+}
+
+/// Why a slice should not be separated from the slice before it. A page
+/// break goes elsewhere if it can; see [`crate::paginate`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Keep {
+    /// A small group: the first or last lines of a paragraph (`orphans`,
+    /// `widows`), content after a box with `break-after: avoid` (headings)
+    /// or before one with `break-before: avoid`, the first row after a
+    /// table's header rows.
+    pub tight: bool,
+    /// Inside a box with `break-inside: avoid`, which may be large. Given
+    /// up first when a group does not fit on a page.
+    pub inside: bool,
 }
 
 /// Table header rows, repeated at the top of each page a table continues
@@ -300,6 +318,8 @@ pub(crate) struct Flow<'c, 'a> {
     marker: Option<String>,
     /// The next slice must start a new page.
     force_break: bool,
+    /// The next slice should stay with the one before it.
+    keep_next: bool,
     /// An element whose border box to report, and the decoration that
     /// records it once laid out. See [`Flow::track`].
     tracked: Option<(NodeId, Option<usize>)>,
@@ -308,6 +328,8 @@ pub(crate) struct Flow<'c, 'a> {
 /// A box entered with [`Flow::open_box`].
 struct OpenBox {
     decoration: Option<usize>,
+    /// The index of the box's first slice, if it has any.
+    first_slice: usize,
 }
 
 impl<'c, 'a> Flow<'c, 'a> {
@@ -330,6 +352,7 @@ impl<'c, 'a> Flow<'c, 'a> {
             edges: 0.0,
             marker: None,
             force_break: false,
+            keep_next: false,
             tracked: None,
         }
     }
@@ -395,8 +418,19 @@ impl<'c, 'a> Flow<'c, 'a> {
             height,
             items,
             break_before: std::mem::take(&mut self.force_break),
+            keep: Keep {
+                tight: std::mem::take(&mut self.keep_next),
+                inside: false,
+            },
             header: None,
         });
+    }
+
+    /// Keeps the last slice added with the one before it.
+    fn keep_last_slice(&mut self) {
+        if let Some(slice) = self.canvas.slices.last_mut() {
+            slice.keep.tight = true;
+        }
     }
 
     /// Lays out the block-level element `id` in a containing block whose
@@ -443,8 +477,10 @@ impl<'c, 'a> Flow<'c, 'a> {
         x: f32,
         tracked: bool,
     ) -> OpenBox {
-        if style.break_before == Break::Page {
-            self.force_break = true;
+        match style.break_before {
+            Break::Page => self.force_break = true,
+            Break::Avoid => self.keep_next = true,
+            Break::Auto => {}
         }
         self.add_margin(geometry.margin.top);
         self.edges += geometry.horizontal_edges();
@@ -476,7 +512,10 @@ impl<'c, 'a> Flow<'c, 'a> {
         } else if let Some(index) = decoration {
             self.unplaced.push(index);
         }
-        OpenBox { decoration }
+        OpenBox {
+            decoration,
+            first_slice: self.canvas.slices.len(),
+        }
     }
 
     /// Makes the content of the box whose decoration is `index` at least
@@ -510,10 +549,18 @@ impl<'c, 'a> Flow<'c, 'a> {
             }
             self.canvas.decorations[index].bottom = self.y;
         }
+        if style.break_inside == BreakInside::Avoid {
+            let inner = (open.first_slice + 1).min(self.canvas.slices.len());
+            for slice in &mut self.canvas.slices[inner..] {
+                slice.keep.inside = true;
+            }
+        }
         self.edges -= geometry.horizontal_edges();
         self.add_margin(geometry.margin.bottom);
-        if style.break_after == Break::Page {
-            self.force_break = true;
+        match style.break_after {
+            Break::Page => self.force_break = true,
+            Break::Avoid => self.keep_next = true,
+            Break::Auto => {}
         }
     }
 

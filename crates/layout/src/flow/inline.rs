@@ -339,6 +339,11 @@ impl Flow<'_, '_> {
         layout.break_all_lines(Some(width));
 
         let marker = self.marker.take();
+        let count = layout.len();
+        // Lines that must share a page with the line before them: the
+        // first `orphans` lines stay together, and so do the last `widows`.
+        let (orphans, widows) = (style.orphans as usize, style.widows as usize);
+        let kept = |index: usize| index > 0 && (index < orphans || index + widows > count);
         for (index, line) in layout.lines().enumerate() {
             let metrics = line.metrics();
             let top = metrics.block_min_coord;
@@ -391,6 +396,9 @@ impl Flow<'_, '_> {
                 metrics.block_max_coord - top,
                 items,
             );
+            if kept(index) {
+                self.keep_last_slice();
+            }
         }
         self.y += f64::from(layout.height());
     }

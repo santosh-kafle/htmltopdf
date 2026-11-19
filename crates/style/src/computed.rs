@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use crate::properties::{
-    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, CssWide, Display,
-    FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType, LonghandId,
-    PropertyDeclaration, TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
+    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, CssWide,
+    Display, FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType,
+    LonghandId, PropertyDeclaration, TextAlign, TextDecorationLine, TextTransform, VerticalAlign,
+    WhiteSpace,
 };
 use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
 
@@ -132,6 +133,11 @@ pub struct ComputedStyle {
     pub list_style_type: ListStyleType,
     pub break_before: Break,
     pub break_after: Break,
+    pub break_inside: BreakInside,
+    /// The fewest lines of a paragraph to leave at the bottom of a page.
+    pub orphans: u32,
+    /// The fewest lines of a paragraph to carry to the top of a page.
+    pub widows: u32,
     pub text_decoration_line: TextDecorationLine,
     pub text_decoration_color: ColorValue,
     pub text_indent: TextIndent,
@@ -178,6 +184,9 @@ impl ComputedStyle {
             list_style_type: ListStyleType::Disc,
             break_before: Break::Auto,
             break_after: Break::Auto,
+            break_inside: BreakInside::Auto,
+            orphans: 2,
+            widows: 2,
             min_height: Dimension::Auto,
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: ColorValue::CurrentColor,
@@ -245,6 +254,9 @@ impl ComputedStyle {
             L::TextTransform => self.text_transform = other.text_transform,
             L::LetterSpacing => self.letter_spacing = other.letter_spacing,
             L::WordSpacing => self.word_spacing = other.word_spacing,
+            L::BreakInside => self.break_inside = other.break_inside,
+            L::Orphans => self.orphans = other.orphans,
+            L::Widows => self.widows = other.widows,
         }
     }
 
@@ -334,6 +346,9 @@ impl ComputedStyle {
             D::TextTransform(v) => self.text_transform = *v,
             D::LetterSpacing(v) => self.letter_spacing = pt(*v),
             D::WordSpacing(v) => self.word_spacing = pt(*v),
+            D::BreakInside(v) => self.break_inside = *v,
+            D::Orphans(v) => self.orphans = *v,
+            D::Widows(v) => self.widows = *v,
             D::CssWide(id, keyword) => {
                 let inherit = match keyword {
                     CssWide::Inherit => true,
