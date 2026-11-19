@@ -196,6 +196,13 @@ keyword_enum! {
 }
 
 keyword_enum! {
+    TableLayout {
+        Auto = "auto",
+        Fixed = "fixed",
+    }
+}
+
+keyword_enum! {
     BorderCollapse {
         Separate = "separate",
         Collapse = "collapse",
@@ -331,6 +338,7 @@ pub enum LonghandId {
     BreakInside,
     Orphans,
     Widows,
+    TableLayout,
 }
 
 impl LonghandId {
@@ -344,7 +352,7 @@ impl LonghandId {
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
-            | TextDecorationLine | TextDecorationColor | BreakInside => false,
+            | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout => false,
         }
     }
 
@@ -383,6 +391,7 @@ impl LonghandId {
             BreakInside,
             Orphans,
             Widows,
+            TableLayout,
         ];
         let sided = Side::ALL.into_iter().flat_map(|side| {
             [
@@ -445,6 +454,7 @@ pub enum PropertyDeclaration {
     Orphans(u32),
     /// At least 1.
     Widows(u32),
+    TableLayout(TableLayout),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -490,6 +500,7 @@ impl PropertyDeclaration {
             D::BreakInside(_) => LonghandId::BreakInside,
             D::Orphans(_) => LonghandId::Orphans,
             D::Widows(_) => LonghandId::Widows,
+            D::TableLayout(_) => LonghandId::TableLayout,
             D::CssWide(id, _) => *id,
         }
     }
@@ -550,6 +561,7 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "break-inside" | "page-break-inside" => one(L::BreakInside),
         "orphans" => one(L::Orphans),
         "widows" => one(L::Widows),
+        "table-layout" => one(L::TableLayout),
         "min-height" => one(L::MinHeight),
         "text-decoration-line" => one(L::TextDecorationLine),
         "text-decoration-color" => one(L::TextDecorationColor),
@@ -690,6 +702,7 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::BreakInside => D::BreakInside(BreakInside::parse(input)?),
         L::Orphans => D::Orphans(parse_line_count(input)?),
         L::Widows => D::Widows(parse_line_count(input)?),
+        L::TableLayout => D::TableLayout(TableLayout::parse(input)?),
     })
 }
 
@@ -1339,6 +1352,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 31 + 4 * 5);
+        assert_eq!(all.len(), 32 + 4 * 5);
     }
 }

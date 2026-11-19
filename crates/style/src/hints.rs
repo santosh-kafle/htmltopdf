@@ -63,8 +63,10 @@ pub(crate) fn presentational_hints(
         hints.push(D::VerticalAlign(valign));
     }
 
-    if matches!(name, "table" | "td" | "th" | "hr" | "img")
-        && let Some(width) = element.attr("width").and_then(parse_dimension)
+    if matches!(
+        name,
+        "table" | "td" | "th" | "col" | "colgroup" | "hr" | "img"
+    ) && let Some(width) = element.attr("width").and_then(parse_dimension)
     {
         hints.push(D::Width(width));
     }
@@ -278,6 +280,10 @@ mod tests {
         assert_eq!(
             hints("<table><tr><td width=120>", "td"),
             [D::Width(Dim::Length(Length::Pt(90.0)))]
+        );
+        assert_eq!(
+            hints("<table><colgroup><col width='25%'>", "col"),
+            [D::Width(Dim::Percent(0.25))]
         );
         assert_eq!(
             hints("<table><tr height=40><td>", "tr"),

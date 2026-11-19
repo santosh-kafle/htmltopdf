@@ -2,21 +2,23 @@
 //!
 //! A simplified version of the automatic table layout algorithm (CSS 2.1
 //! section 17.5.2.2): columns are sized from the min- and max-content
-//! widths of their cells, then each row is laid out as one unbreakable
-//! slice. Header rows repeat at the top of every page the table continues
+//! widths of their cells and the widths given to cells and `<col>`s, then
+//! each row is laid out as one unbreakable slice. `table-layout: fixed`
+//! (section 17.5.2.1) takes the widths from the `<col>`s and the first row
+//! alone. Header rows repeat at the top of every page the table continues
 //! on.
 //!
 //! Not supported yet: cells spanning rows are placed correctly but only
-//! occupy their first row; `<col>` widths; `height` on the table and row
-//! groups (cells and rows take it as a minimum); the full collapsed
-//! border model (shared borders are drawn once, without conflict
-//! resolution).
+//! occupy their first row; `height` on the table and row groups (cells and
+//! rows take it as a minimum); the full collapsed border model (shared
+//! borders are drawn once, without conflict resolution).
 
 use std::rc::Rc;
 
 use presswork_dom::NodeId;
 use presswork_style::{
-    BorderCollapse, BoxSizing, ComputedStyle, Dimension, Display, Side, Sides, VerticalAlign,
+    BorderCollapse, BoxSizing, ComputedStyle, Dimension, Display, Side, Sides, TableLayout,
+    VerticalAlign,
 };
 
 use super::boxes::BoxGeometry;
@@ -49,6 +51,17 @@ impl Cell {
         self.border.top + self.border.bottom + self.padding.top + self.padding.bottom
     }
 
+    /// The width the cell asks for: a length (of its border box, whatever
+    /// its `box-sizing`), a percentage of the table, or `auto`.
+    fn width(&self) -> Dimension {
+        match (self.style.width, self.style.box_sizing) {
+            (Dimension::Pt(width), BoxSizing::ContentBox) => {
+                Dimension::Pt(width + self.horizontal_edges())
+            }
+            (width, _) => width,
+        }
+    }
+
     /// The least border-box height its `height` asks for: as in browsers,
     /// a cell (and a row) grows to fit taller content. `min-height` and
     /// `max-height` do not apply to cells.
@@ -59,6 +72,29 @@ impl Cell {
             _ => 0.0,
         }
     }
+}
+
+/// The parts of a table, from [`Flow::collect_rows`].
+struct TableParts {
+    captions: Vec<(NodeId, ComputedStyle)>,
+    /// Header rows first, footer rows last.
+    rows: Vec<Row>,
+    /// The width each `<col>` gives its column, in column order.
+    columns: Vec<Dimension>,
+}
+
+/// What a column's cells and `<col>` ask of its width, for the automatic
+/// table layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Column {
+    /// The narrowest and widest the content can be.
+    min: f32,
+    /// For a fixed-width column, its width (if wider than `min`).
+    max: f32,
+    /// A percentage of the table's width, as a fraction.
+    percent: Option<f32>,
+    /// A width in points, from a cell or a `<col>`.
+    fixed: Option<f32>,
 }
 
 struct Row {
@@ -123,54 +159,66 @@ impl Flow<'_, '_> {
     /// Lays out the table `id` in a containing block whose content box
     /// starts at `x` and is `width` wide.
     pub(super) fn table(&mut self, id: NodeId, style: &ComputedStyle, x: f32, width: f32) {
-        let (captions, mut rows) = self.collect_rows(id, style);
+        let TableParts {
+            captions,
+            mut rows,
+            columns: col_widths,
+        } = self.collect_rows(id, style);
         for (caption, caption_style) in &captions {
             self.block(*caption, caption_style, x, width);
         }
 
         let columns = assign_columns(&mut rows);
-        for cell in rows.iter_mut().flat_map(|row| &mut row.cells) {
-            self.measure_cell(cell);
-        }
-
         let collapse = style.border_collapse == BorderCollapse::Collapse;
         let spacing = if collapse { 0.0 } else { style.border_spacing };
         let gaps = spacing * (columns as f32 + 1.0);
-        let (min, max, percent) = column_constraints(&rows, columns, spacing);
-        let (min_total, max_total) = (
-            min.iter().sum::<f32>() + gaps,
-            max.iter().sum::<f32>() + gaps,
-        );
 
         // The table's own box. Its content width is the grid's width.
         let probe = BoxGeometry::resolve(style, width, Some(0.0));
         let edges = probe.border_box_width();
         let specified = BoxGeometry::specified_content_width(style, width, edges);
-        if self.is_measuring() {
-            let outer = edges
-                + style.margin.left.resolve(0.0).unwrap_or(0.0)
-                + style.margin.right.resolve(0.0).unwrap_or(0.0);
-            let fixed = match style.width {
-                Dimension::Pt(_) => specified,
-                _ => None,
-            };
-            self.record_extent(
-                outer + fixed.unwrap_or(min_total).max(min_total),
-                outer + fixed.unwrap_or(max_total).max(min_total),
-            );
-            return;
-        }
-        let margins = style.margin.left.resolve(width).unwrap_or(0.0)
-            + style.margin.right.resolve(width).unwrap_or(0.0);
-        let available = (width - margins - edges).max(0.0);
-        let content_width = match specified {
-            Some(specified) => specified.max(min_total),
-            None => max_total.min(available).max(min_total),
+
+        let fixed_layout = style.table_layout == TableLayout::Fixed && !self.is_measuring();
+        let widths = match specified {
+            // Fixed layout needs a width to share out; without one it is
+            // automatic (CSS 2.1 section 17.5.2).
+            Some(specified) if fixed_layout => {
+                fixed_column_widths(&rows, &col_widths, columns, spacing, specified - gaps)
+            }
+            _ => {
+                for cell in rows.iter_mut().flat_map(|row| &mut row.cells) {
+                    self.measure_cell(cell);
+                }
+                let constraints = column_constraints(&rows, &col_widths, columns, spacing);
+                let (min_total, max_total) = (
+                    constraints.iter().map(|c| c.min).sum::<f32>() + gaps,
+                    constraints.iter().map(|c| c.max).sum::<f32>() + gaps,
+                );
+                if self.is_measuring() {
+                    let outer = edges
+                        + style.margin.left.resolve(0.0).unwrap_or(0.0)
+                        + style.margin.right.resolve(0.0).unwrap_or(0.0);
+                    let fixed = match style.width {
+                        Dimension::Pt(_) => specified,
+                        _ => None,
+                    };
+                    self.record_extent(
+                        outer + fixed.unwrap_or(min_total).max(min_total),
+                        outer + fixed.unwrap_or(max_total).max(min_total),
+                    );
+                    return;
+                }
+                let margins = style.margin.left.resolve(width).unwrap_or(0.0)
+                    + style.margin.right.resolve(width).unwrap_or(0.0);
+                let available = (width - margins - edges).max(0.0);
+                let content_width = match specified {
+                    Some(specified) => specified.max(min_total),
+                    None => max_total.min(available).max(min_total),
+                };
+                distribute(&constraints, content_width - gaps)
+            }
         };
-        let grid = Grid::new(
-            distribute(&min, &max, &percent, content_width - gaps),
-            spacing,
-        );
+        let grid = Grid::new(widths, spacing);
         let geometry = BoxGeometry::resolve(style, width, Some(grid.total_width()));
         let content_x = x + geometry.content_x();
 
@@ -237,15 +285,11 @@ impl Flow<'_, '_> {
 
     /// Finds the table's captions and rows. Rows in header groups come
     /// first and rows in footer groups last, whatever the source order.
-    #[allow(clippy::type_complexity, reason = "a private pair of lists")]
-    fn collect_rows(
-        &mut self,
-        table: NodeId,
-        style: &ComputedStyle,
-    ) -> (Vec<(NodeId, ComputedStyle)>, Vec<Row>) {
+    fn collect_rows(&mut self, table: NodeId, style: &ComputedStyle) -> TableParts {
         let doc = self.cx.doc;
         let styles = self.cx.styles;
         let mut captions = Vec::new();
+        let mut columns = Vec::new();
         let (mut head, mut body, mut foot) = (Vec::new(), Vec::new(), Vec::new());
 
         let make_row = |row: NodeId, row_style: ComputedStyle, header: bool| {
@@ -285,11 +329,40 @@ impl Flow<'_, '_> {
             }
         };
 
+        // A `span` attribute: how many columns a `<col>` or `<colgroup>`
+        // stands for.
+        let span = |node: NodeId| {
+            doc.element(node)
+                .and_then(|element| element.attr("span"))
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(1)
+                .clamp(1, 1000)
+        };
         for child in doc.children(table) {
-            if doc.element(child).is_none() {
+            let Some(element) = doc.element(child) else {
+                continue;
+            };
+            let child_style = styles.style(doc, child, Some(style));
+            // Columns are `display: none` but still give widths.
+            if element.name == "colgroup" || element.name == "col" {
+                let cols: Vec<NodeId> = doc
+                    .children(child)
+                    .filter(|&col| doc.element(col).is_some_and(|e| e.name == "col"))
+                    .collect();
+                if element.name == "col" || cols.is_empty() {
+                    columns.extend(std::iter::repeat_n(child_style.width, span(child)));
+                }
+                for col in cols {
+                    let col_style = styles.style(doc, col, Some(&child_style));
+                    // A `<col>` without a width takes its group's.
+                    let width = match col_style.width {
+                        Dimension::Auto => child_style.width,
+                        width => width,
+                    };
+                    columns.extend(std::iter::repeat_n(width, span(col)));
+                }
                 continue;
             }
-            let child_style = styles.style(doc, child, Some(style));
             match child_style.display {
                 Display::TableCaption => captions.push((child, child_style)),
                 Display::TableRow => body.push(make_row(child, child_style, false)),
@@ -316,7 +389,11 @@ impl Flow<'_, '_> {
 
         head.extend(body);
         head.extend(foot);
-        (captions, head)
+        TableParts {
+            captions,
+            rows: head,
+            columns,
+        }
     }
 
     /// Measures the min- and max-content width of a cell's border box.
@@ -327,11 +404,7 @@ impl Flow<'_, '_> {
         let edges = cell.horizontal_edges();
         cell.min = content.min + edges;
         cell.max = content.max + edges;
-        if let Dimension::Pt(width) = cell.style.width {
-            let width = match cell.style.box_sizing {
-                BoxSizing::ContentBox => width + edges,
-                BoxSizing::BorderBox => width,
-            };
+        if let Dimension::Pt(width) = cell.width() {
             // A specified width is the preferred width, but never
             // narrower than the content can go.
             cell.max = width.max(cell.min);
@@ -473,25 +546,32 @@ fn assign_columns(rows: &mut [Row]) -> usize {
     occupied.len()
 }
 
-/// The min-content width, max-content width and percentage width of each
-/// column.
+/// What each column asks of its width, from its cells and the widths of
+/// the `<col>`s in `cols`.
 fn column_constraints(
     rows: &[Row],
+    cols: &[Dimension],
     columns: usize,
     spacing: f32,
-) -> (Vec<f32>, Vec<f32>, Vec<Option<f32>>) {
-    let mut min = vec![0.0_f32; columns];
-    let mut max = vec![0.0_f32; columns];
-    let mut percent = vec![None; columns];
+) -> Vec<Column> {
+    let mut constraints = vec![Column::default(); columns];
     let cells = || rows.iter().flat_map(|row| &row.cells);
-
-    for cell in cells().filter(|cell| cell.span == 1) {
-        let column = cell.column;
-        min[column] = min[column].max(cell.min);
-        max[column] = max[column].max(cell.max);
-        if let Dimension::Percent(fraction) = cell.style.width {
-            percent[column] = Some(percent[column].unwrap_or(0.0_f32).max(fraction));
+    let widen = |column: &mut Column, width: Dimension| match width {
+        Dimension::Pt(width) => column.fixed = Some(column.fixed.unwrap_or(0.0).max(width)),
+        Dimension::Percent(fraction) => {
+            column.percent = Some(column.percent.unwrap_or(0.0).max(fraction));
         }
+        Dimension::Auto => {}
+    };
+
+    for (column, &width) in constraints.iter_mut().zip(cols) {
+        widen(column, width);
+    }
+    for cell in cells().filter(|cell| cell.span == 1) {
+        let column = &mut constraints[cell.column];
+        column.min = column.min.max(cell.min);
+        column.max = column.max.max(cell.max);
+        widen(column, cell.width());
     }
     // A spanning cell widens its columns equally if they are too narrow.
     for cell in cells().filter(|cell| cell.span > 1) {
@@ -501,59 +581,140 @@ fn column_constraints(
             continue;
         }
         let between = spacing * (count - 1.0);
-        for (widths, needed) in [(&mut min, cell.min), (&mut max, cell.max)] {
-            let current = widths[range.clone()].iter().sum::<f32>() + between;
+        let spanned = &mut constraints[range];
+        let fields: [fn(&mut Column) -> &mut f32; 2] = [|c| &mut c.min, |c| &mut c.max];
+        for (field, needed) in fields.into_iter().zip([cell.min, cell.max]) {
+            let current = spanned.iter_mut().map(|c| *field(c)).sum::<f32>() + between;
             if needed > current {
                 let extra = (needed - current) / count;
-                widths[range.clone()].iter_mut().for_each(|w| *w += extra);
+                spanned.iter_mut().for_each(|c| *field(c) += extra);
             }
         }
     }
-    for (max, min) in max.iter_mut().zip(&min) {
-        *max = max.max(*min);
+    for column in &mut constraints {
+        // A fixed width is the column's preferred width, whatever the
+        // content would like, but it never squeezes the content.
+        if let Some(fixed) = column.fixed {
+            column.max = fixed;
+        }
+        column.max = column.max.max(column.min);
     }
-    (min, max, percent)
+    constraints
 }
 
 /// Divides `available` width among columns.
 ///
-/// Percentage columns get their share first. The rest get their
-/// max-content width if everything fits (sharing any surplus in proportion
-/// to it), otherwise a width between min- and max-content, and never less
-/// than min-content.
-fn distribute(min: &[f32], max: &[f32], percent: &[Option<f32>], available: f32) -> Vec<f32> {
-    let mut widths = vec![0.0; min.len()];
+/// Percentage columns get their share first. Then, if there is room,
+/// fixed-width columns get their width and the other columns their
+/// max-content width, and only those other columns share any surplus, in
+/// proportion to their max-content width. With less room, the other
+/// columns shrink toward their min-content width before fixed-width ones
+/// do. No column is ever narrower than its min-content width.
+fn distribute(columns: &[Column], available: f32) -> Vec<f32> {
+    let mut widths = vec![0.0; columns.len()];
     let mut remaining = available;
-    for (i, fraction) in percent.iter().enumerate() {
-        if let Some(fraction) = fraction {
-            widths[i] = (fraction * available).max(min[i]);
+    for (i, column) in columns.iter().enumerate() {
+        if let Some(fraction) = column.percent {
+            widths[i] = (fraction * available).max(column.min);
             remaining -= widths[i];
         }
     }
 
-    let flexible: Vec<usize> = (0..min.len()).filter(|&i| percent[i].is_none()).collect();
-    if flexible.is_empty() {
-        return widths;
-    }
-    let min_total: f32 = flexible.iter().map(|&i| min[i]).sum();
-    let max_total: f32 = flexible.iter().map(|&i| max[i]).sum();
-    for &i in &flexible {
-        widths[i] = if remaining >= max_total {
-            let surplus = remaining - max_total;
-            let share = if max_total > 0.0 {
-                max[i] / max_total
-            } else {
-                1.0 / flexible.len() as f32
-            };
-            max[i] + surplus * share
-        } else if remaining > min_total {
-            let t = (remaining - min_total) / (max_total - min_total);
-            min[i] + (max[i] - min[i]) * t
-        } else {
-            min[i]
-        };
+    let (fixed, auto): (Vec<usize>, Vec<usize>) = (0..columns.len())
+        .filter(|&i| columns[i].percent.is_none())
+        .partition(|&i| columns[i].fixed.is_some());
+    let total = |set: &[usize], field: fn(&Column) -> f32| -> f32 {
+        set.iter().map(|&i| field(&columns[i])).sum()
+    };
+    let (auto_min, fixed_max) = (total(&auto, |c| c.min), total(&fixed, |c| c.max));
+    if auto.is_empty() {
+        fit(columns, &fixed, remaining, &mut widths);
+    } else if remaining >= fixed_max + auto_min {
+        for &i in &fixed {
+            widths[i] = columns[i].max;
+        }
+        fit(columns, &auto, remaining - fixed_max, &mut widths);
+    } else {
+        for &i in &auto {
+            widths[i] = columns[i].min;
+        }
+        fit(columns, &fixed, remaining - auto_min, &mut widths);
     }
     widths
+}
+
+/// Sizes the columns in `set` to share `space`: their max-content widths
+/// plus a share of any surplus in proportion to them, or with too little
+/// room, widths between min- and max-content, never below min-content.
+fn fit(columns: &[Column], set: &[usize], space: f32, widths: &mut [f32]) {
+    let min_total: f32 = set.iter().map(|&i| columns[i].min).sum();
+    let max_total: f32 = set.iter().map(|&i| columns[i].max).sum();
+    for &i in set {
+        let Column { min, max, .. } = columns[i];
+        widths[i] = if space >= max_total {
+            let surplus = space - max_total;
+            let share = if max_total > 0.0 {
+                max / max_total
+            } else {
+                1.0 / set.len() as f32
+            };
+            max + surplus * share
+        } else if space > min_total {
+            let t = (space - min_total) / (max_total - min_total);
+            min + (max - min) * t
+        } else {
+            min
+        };
+    }
+}
+
+/// Column widths for `table-layout: fixed` (CSS 2.1 section 17.5.2.1),
+/// sharing `available`: a `<col>`'s width, else the width of the first
+/// row's cell in the column (split over its columns if it spans several);
+/// the remaining columns share what is left equally. Content is not
+/// measured. If every column has a width and they fall short, they grow
+/// in proportion.
+fn fixed_column_widths(
+    rows: &[Row],
+    cols: &[Dimension],
+    columns: usize,
+    spacing: f32,
+    available: f32,
+) -> Vec<f32> {
+    let resolve = |width: Dimension| width.resolve(available).map(|w| w.max(0.0));
+    let mut widths: Vec<Option<f32>> = (0..columns)
+        .map(|i| cols.get(i).copied().and_then(resolve))
+        .collect();
+    if let Some(first) = rows.first() {
+        for cell in &first.cells {
+            let range = cell.column..(cell.column + cell.span).min(columns);
+            if range.is_empty() || widths[range.clone()].iter().any(Option::is_some) {
+                continue;
+            }
+            if let Some(width) = resolve(cell.width()) {
+                let count = range.len() as f32;
+                let each = ((width - spacing * (count - 1.0)) / count).max(0.0);
+                widths[range].fill(Some(each));
+            }
+        }
+    }
+
+    let known: f32 = widths.iter().flatten().sum();
+    let unknown = widths.iter().filter(|w| w.is_none()).count();
+    let rest = if unknown > 0 {
+        ((available - known) / unknown as f32).max(0.0)
+    } else {
+        0.0
+    };
+    let scale = if unknown == 0 && known > 0.0 && known < available {
+        available / known
+    } else {
+        1.0
+    };
+    widths
+        .into_iter()
+        .map(|width| width.map_or(rest, |width| width * scale))
+        .collect()
 }
 
 #[cfg(test)]
@@ -564,34 +725,90 @@ mod tests {
         a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01)
     }
 
+    fn auto(min: f32, max: f32) -> Column {
+        Column {
+            min,
+            max,
+            ..Column::default()
+        }
+    }
+
+    fn fixed(min: f32, width: f32) -> Column {
+        Column {
+            min,
+            max: width.max(min),
+            fixed: Some(width),
+            percent: None,
+        }
+    }
+
     #[test]
     fn columns_get_max_content_when_it_fits() {
-        let widths = distribute(&[10.0, 20.0], &[30.0, 60.0], &[None, None], 90.0);
+        let widths = distribute(&[auto(10.0, 30.0), auto(20.0, 60.0)], 90.0);
         assert!(approx(&widths, &[30.0, 60.0]), "{widths:?}");
     }
 
     #[test]
     fn surplus_is_shared_in_proportion() {
-        let widths = distribute(&[10.0, 20.0], &[30.0, 60.0], &[None, None], 180.0);
+        let widths = distribute(&[auto(10.0, 30.0), auto(20.0, 60.0)], 180.0);
         assert!(approx(&widths, &[60.0, 120.0]), "{widths:?}");
     }
 
     #[test]
     fn tight_space_interpolates_between_min_and_max() {
-        let widths = distribute(&[10.0, 20.0], &[30.0, 60.0], &[None, None], 60.0);
+        let widths = distribute(&[auto(10.0, 30.0), auto(20.0, 60.0)], 60.0);
         assert!(approx(&widths, &[20.0, 40.0]), "{widths:?}");
     }
 
     #[test]
     fn columns_never_shrink_below_min_content() {
-        let widths = distribute(&[10.0, 20.0], &[30.0, 60.0], &[None, None], 5.0);
+        let widths = distribute(&[auto(10.0, 30.0), auto(20.0, 60.0)], 5.0);
         assert!(approx(&widths, &[10.0, 20.0]), "{widths:?}");
     }
 
     #[test]
     fn percentage_columns_take_their_share_first() {
-        let widths = distribute(&[10.0, 10.0], &[50.0, 50.0], &[Some(0.75), None], 200.0);
+        let percent = Column {
+            percent: Some(0.75),
+            ..auto(10.0, 50.0)
+        };
+        let widths = distribute(&[percent, auto(10.0, 50.0)], 200.0);
         assert!(approx(&widths, &[150.0, 50.0]), "{widths:?}");
+    }
+
+    #[test]
+    fn fixed_columns_keep_their_width_and_auto_ones_take_the_rest() {
+        // The usual invoice row: a narrow number, the description, the amount.
+        let columns = [fixed(10.0, 30.0), auto(20.0, 80.0), fixed(30.0, 75.0)];
+        let widths = distribute(&columns, 400.0);
+        assert!(approx(&widths, &[30.0, 295.0, 75.0]), "{widths:?}");
+        // Tight: the description gives way first...
+        let widths = distribute(&columns, 125.0);
+        assert!(approx(&widths, &[30.0, 20.0, 75.0]), "{widths:?}");
+        // ...then the fixed columns, down to their content.
+        let widths = distribute(&columns, 80.0);
+        assert!(approx(&widths, &[16.154, 20.0, 43.846]), "{widths:?}");
+    }
+
+    #[test]
+    fn fixed_columns_share_the_surplus_when_nothing_else_can() {
+        let widths = distribute(&[fixed(0.0, 50.0), fixed(0.0, 150.0)], 400.0);
+        assert!(approx(&widths, &[100.0, 300.0]), "{widths:?}");
+    }
+
+    #[test]
+    fn fixed_layout_shares_what_widths_leave_equally() {
+        let widths = fixed_column_widths(&[], &[Dimension::Pt(100.0)], 3, 0.0, 300.0);
+        assert!(approx(&widths, &[100.0, 100.0, 100.0]), "{widths:?}");
+        let widths = fixed_column_widths(
+            &[],
+            &[Dimension::Percent(0.25), Dimension::Pt(50.0)],
+            2,
+            0.0,
+            300.0,
+        );
+        // Every column has a width and they fall short: they grow.
+        assert!(approx(&widths, &[180.0, 120.0]), "{widths:?}");
     }
 
     #[test]

@@ -1086,3 +1086,43 @@ fn table_header_rows_are_not_left_alone_at_a_page_bottom() {
     assert_eq!(page_of(&pages, "Head"), 1);
     assert_eq!(words(&pages[1]).iter().filter(|w| **w == "Head").count(), 1);
 }
+
+#[test]
+fn fixed_width_columns_keep_their_width_in_a_wide_table() {
+    let content_width = LayoutOptions::default().page_size.width - 2.0 * M;
+    let row = "<td>Num</td><td>Description</td><td>Amount</td>";
+    for html in [
+        "<table width='100%' cellspacing=0 cellpadding=0>
+         <tr><td width=40>Num</td><td>Description</td><td width=100>Amount</td></table>"
+            .to_owned(),
+        format!(
+            "<table width='100%' cellspacing=0 cellpadding=0>
+             <colgroup><col width=40><col><col style='width:75pt'></colgroup><tr>{row}</table>"
+        ),
+    ] {
+        let pages = layout(&format!("<body style='margin:0'>{html}"));
+        let page = &pages[0];
+        // 40px is 30pt, 100px 75pt; the description takes the rest.
+        assert!(
+            approx(run_with(page, "Description").origin.x, M + 30.0),
+            "{html}"
+        );
+        assert!(approx(
+            run_with(page, "Amount").origin.x,
+            M + content_width - 75.0
+        ));
+    }
+}
+
+#[test]
+fn fixed_table_layout_ignores_the_content() {
+    let pages = layout(
+        "<body style='margin:0'><table style='table-layout:fixed; width:300pt'
+         cellspacing=0 cellpadding=0><col style='width:50pt'>
+         <tr><td>a</td><td>averyveryveryverylongword</td><td>c</td></tr></table>",
+    );
+    let page = &pages[0];
+    // 50pt, then the other two share the remaining 250pt.
+    assert!(approx(run_with(page, "averyvery").origin.x, M + 50.0));
+    assert!(approx(run_with(page, "c").origin.x, M + 175.0));
+}

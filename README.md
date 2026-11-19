@@ -29,8 +29,8 @@ maintained, and accepts the same command line.
     `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
     `background-color`
   - images: `width`, `height`, `max-width`, `max-height`, `vertical-align`
-  - tables: `border-collapse`, `border-spacing`, `vertical-align`, `height`
-    on cells and rows
+  - tables: `border-collapse`, `border-spacing`, `table-layout`,
+    `vertical-align`, `height` on cells and rows
   - lists: `list-style-type`
   - pages: `break-before`, `break-after`, `break-inside` (`page` and
     `avoid`) and the `page-break-*` aliases, `orphans`, `widows`
@@ -47,7 +47,9 @@ maintained, and accepts the same command line.
   from a directory given with `--allow`, as in wkhtmltopdf 0.12.6.
   Relative URLs resolve against the input file (or the current directory
   for standard input), and inside a stylesheet against the stylesheet.
-- **Tables.** Columns are sized to their content, with `colspan`, cell
+- **Tables.** Columns are sized to their content and to the widths given
+  to cells and `<col>`s (columns with a width keep it; the others share
+  the rest), with `colspan`, cell
   borders and backgrounds, and collapsed borders. Rows are never split
   across pages, `<thead>` rows repeat at the top of every page, and a
   header is never left alone at the bottom of a page.

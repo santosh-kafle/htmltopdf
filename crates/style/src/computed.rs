@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::properties::{
     BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, CssWide,
     Display, FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType,
-    LonghandId, PropertyDeclaration, TextAlign, TextDecorationLine, TextTransform, VerticalAlign,
-    WhiteSpace,
+    LonghandId, PropertyDeclaration, TableLayout, TextAlign, TextDecorationLine, TextTransform,
+    VerticalAlign, WhiteSpace,
 };
 use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
 
@@ -134,6 +134,7 @@ pub struct ComputedStyle {
     pub break_before: Break,
     pub break_after: Break,
     pub break_inside: BreakInside,
+    pub table_layout: TableLayout,
     /// The fewest lines of a paragraph to leave at the bottom of a page.
     pub orphans: u32,
     /// The fewest lines of a paragraph to carry to the top of a page.
@@ -185,6 +186,7 @@ impl ComputedStyle {
             break_before: Break::Auto,
             break_after: Break::Auto,
             break_inside: BreakInside::Auto,
+            table_layout: TableLayout::Auto,
             orphans: 2,
             widows: 2,
             min_height: Dimension::Auto,
@@ -257,6 +259,7 @@ impl ComputedStyle {
             L::BreakInside => self.break_inside = other.break_inside,
             L::Orphans => self.orphans = other.orphans,
             L::Widows => self.widows = other.widows,
+            L::TableLayout => self.table_layout = other.table_layout,
         }
     }
 
@@ -349,6 +352,7 @@ impl ComputedStyle {
             D::BreakInside(v) => self.break_inside = *v,
             D::Orphans(v) => self.orphans = *v,
             D::Widows(v) => self.widows = *v,
+            D::TableLayout(v) => self.table_layout = *v,
             D::CssWide(id, keyword) => {
                 let inherit = match keyword {
                     CssWide::Inherit => true,
