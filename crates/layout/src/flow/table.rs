@@ -8,11 +8,15 @@
 //! alone. Header rows repeat at the top of every page the table continues
 //! on.
 //!
-//! Not supported yet: cells spanning rows are placed correctly but only
-//! occupy their first row; `height` on the table and row groups (cells and
-//! rows take it as a minimum); the full collapsed border model (shared
-//! borders are drawn once, without conflict resolution).
+//! A cell spanning rows is laid out over all of them, growing them if it
+//! is taller, and rows joined by such cells form one slice, so they stay
+//! on one page.
+//!
+//! Not supported yet: `height` on the table and row groups (cells and rows
+//! take it as a minimum); the full collapsed border model (shared borders
+//! are drawn once, without conflict resolution).
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use presswork_dom::NodeId;
@@ -22,7 +26,7 @@ use presswork_style::{
 };
 
 use super::boxes::BoxGeometry;
-use super::{BoxPaint, Flow, RepeatedHeader};
+use super::{BoxPaint, Canvas, Flow, RepeatedHeader};
 use crate::fragment::{Fill, Item};
 use crate::geometry::Rect;
 
@@ -102,6 +106,24 @@ struct Row {
     cells: Vec<Cell>,
     /// The row belongs to a header group and repeats on each page.
     header: bool,
+    /// The row group it belongs to: cells cannot span rows across groups.
+    group: usize,
+}
+
+/// A cell's content, laid out at its width.
+struct LaidOutCell {
+    canvas: Canvas,
+    content_height: f32,
+    /// Border-box width.
+    width: f32,
+}
+
+impl Cell {
+    /// The border-box height the cell needs: its content's, or its
+    /// `height` if more.
+    fn needed_height(&self, laid_out: &LaidOutCell) -> f32 {
+        (laid_out.content_height + self.vertical_edges()).max(self.min_height())
+    }
 }
 
 /// Column positions and widths, relative to the table's content box.
@@ -168,6 +190,7 @@ impl Flow<'_, '_> {
             self.block(*caption, caption_style, x, width);
         }
 
+        clamp_row_spans(&mut rows);
         let columns = assign_columns(&mut rows);
         let collapse = style.border_collapse == BorderCollapse::Collapse;
         let spacing = if collapse { 0.0 } else { style.border_spacing };
@@ -236,21 +259,30 @@ impl Flow<'_, '_> {
         self.settle_margin();
         self.y += f64::from(spacing);
 
+        let laid_out: Vec<Vec<LaidOutCell>> = rows
+            .iter()
+            .map(|row| self.layout_cells(row, &grid))
+            .collect();
+        let heights = row_heights(&rows, &laid_out, spacing);
+        let coverage = Coverage::new(&rows, columns);
+        let mut laid_out = laid_out.into_iter();
+
         let mut header_items = Vec::new();
         let mut header_height = 0.0;
         let mut header: Option<Rc<RepeatedHeader>> = None;
-        let last = rows.len().saturating_sub(1);
-        let mut previous_has_bottom_border = false;
-        for (index, row) in rows.iter().enumerate() {
-            let position = RowPosition {
-                first: index == 0,
-                last: index == last,
-                below_border: previous_has_bottom_border,
+        for block in row_blocks(&rows) {
+            let rows_in_block = RowBlock {
+                first: block.start,
+                total: rows.len(),
+                rows: &rows[block.clone()],
+                heights: &heights[block.clone()],
+                coverage: &coverage,
             };
-            let (height, items) = self.layout_row(row, &grid, content_x, table_edges, position);
-            previous_has_bottom_border = row.cells.iter().any(|cell| cell.border.bottom > 0.0);
+            let cells = laid_out.by_ref().take(block.len()).collect();
+            let (height, items) = rows_in_block.paint(cells, &grid, content_x, table_edges);
 
-            if row.header {
+            let is_header = rows[block.start].header;
+            if is_header {
                 header_items.extend(
                     items
                         .iter()
@@ -268,13 +300,11 @@ impl Flow<'_, '_> {
             self.push_slice(self.y, height, items);
             // Header rows stay together and with the first row after them,
             // so that a header is never alone at the bottom of a page.
-            let after_header = index > 0 && rows[index - 1].header;
+            let after_header = block.start > 0 && rows[block.start - 1].header;
             if after_header {
                 self.keep_last_slice();
             }
-            if !row.header
-                && let Some(slice) = self.canvas.slices.last_mut()
-            {
+            if !is_header && let Some(slice) = self.canvas.slices.last_mut() {
                 slice.header.clone_from(&header);
             }
             self.y += f64::from(height + spacing);
@@ -290,9 +320,10 @@ impl Flow<'_, '_> {
         let styles = self.cx.styles;
         let mut captions = Vec::new();
         let mut columns = Vec::new();
+        let mut groups = 0;
         let (mut head, mut body, mut foot) = (Vec::new(), Vec::new(), Vec::new());
 
-        let make_row = |row: NodeId, row_style: ComputedStyle, header: bool| {
+        let make_row = |row: NodeId, row_style: ComputedStyle, header: bool, group: usize| {
             let cells = doc
                 .children(row)
                 .filter_map(|cell| {
@@ -305,14 +336,17 @@ impl Flow<'_, '_> {
                         element
                             .attr(name)
                             .and_then(|s| s.trim().parse::<usize>().ok())
-                            .unwrap_or(1)
-                            .clamp(1, 1000)
                     };
                     Some(Cell {
                         node: cell,
                         column: 0,
-                        span: span("colspan"),
-                        row_span: span("rowspan"),
+                        span: span("colspan").unwrap_or(1).clamp(1, 1000),
+                        // `rowspan=0` spans to the end of the row group; see
+                        // `clamp_row_spans`.
+                        row_span: match span("rowspan") {
+                            Some(0) => usize::MAX,
+                            span => span.unwrap_or(1).clamp(1, 65534),
+                        },
                         border: cell_style.border_widths(),
                         // Percentage padding on cells is not supported.
                         padding: cell_style.padding.map(|p| p.resolve(0.0).unwrap_or(0.0)),
@@ -326,6 +360,7 @@ impl Flow<'_, '_> {
                 style: row_style,
                 cells,
                 header,
+                group,
             }
         };
 
@@ -365,7 +400,8 @@ impl Flow<'_, '_> {
             }
             match child_style.display {
                 Display::TableCaption => captions.push((child, child_style)),
-                Display::TableRow => body.push(make_row(child, child_style, false)),
+                // Rows outside any group share an anonymous one.
+                Display::TableRow => body.push(make_row(child, child_style, false, usize::MAX)),
                 Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup => {
                     let header = child_style.display == Display::TableHeaderGroup;
                     let group = match child_style.display {
@@ -373,13 +409,14 @@ impl Flow<'_, '_> {
                         Display::TableFooterGroup => &mut foot,
                         _ => &mut body,
                     };
+                    groups += 1;
                     for row in doc.children(child) {
                         if doc.element(row).is_none() {
                             continue;
                         }
                         let row_style = styles.style(doc, row, Some(&child_style));
                         if row_style.display == Display::TableRow {
-                            group.push(make_row(row, row_style, header));
+                            group.push(make_row(row, row_style, header, groups));
                         }
                     }
                 }
@@ -411,114 +448,279 @@ impl Flow<'_, '_> {
         }
     }
 
-    /// Lays out one row. Returns its height and its items, positioned
-    /// relative to the canvas's left edge and the row's top.
-    fn layout_row(
-        &mut self,
-        row: &Row,
-        grid: &Grid,
-        content_x: f32,
-        edges: TableEdges,
-        position: RowPosition,
-    ) -> (f32, Vec<Item>) {
-        // Lay out every cell first: the tallest sets the row's height.
-        let mut laid_out = Vec::with_capacity(row.cells.len());
-        let mut height = 0.0_f32;
-        for cell in &row.cells {
-            let width = grid.span_width(cell.column, cell.span);
-            let mut flow = Flow::new(self.cx);
-            flow.block_contents(
-                cell.node,
-                &cell.style,
-                0.0,
-                (width - cell.horizontal_edges()).max(0.0),
-            );
-            let (canvas, content_height) = flow.finish();
-            let content_height = content_height as f32;
-            height = height
-                .max(content_height + cell.vertical_edges())
-                .max(cell.min_height());
-            laid_out.push((canvas, content_height, width));
-        }
-
-        if let Dimension::Pt(min) = row.style.height {
-            height = height.max(min);
-        }
-
-        let mut items = Vec::new();
-        if !row.style.background_color.is_transparent() && !grid.widths.is_empty() {
-            let width = grid.total_width() - 2.0 * grid.spacing;
-            items.push(Item::Fill(Fill {
-                rect: Rect::new(content_x + grid.spacing, 0.0, width, height),
-                color: row.style.background_color,
-            }));
-        }
-
-        let last_column = grid.widths.len();
-        let mut previous_has_right_border = false;
-        for (cell, (canvas, content_height, width)) in row.cells.iter().zip(laid_out) {
-            let cell_x = content_x + grid.starts.get(cell.column).copied().unwrap_or(0.0);
-
-            if let Some(mut paint) = BoxPaint::from_style(&cell.style) {
-                if edges.collapse {
-                    // Borders shared with a neighbor or the table are
-                    // drawn once, by whoever comes first.
-                    let at_left = cell.column == 0;
-                    let at_right = cell.column + cell.span >= last_column;
-                    let hidden = [
-                        (
-                            Side::Left,
-                            if at_left {
-                                edges.left
-                            } else {
-                                previous_has_right_border
-                            },
-                        ),
-                        (
-                            Side::Top,
-                            if position.first {
-                                edges.top
-                            } else {
-                                position.below_border
-                            },
-                        ),
-                        (Side::Right, at_right && edges.right),
-                        (Side::Bottom, position.last && edges.bottom),
-                    ];
-                    for (side, hide) in hidden {
-                        if hide {
-                            paint = paint.without_border(side);
-                        }
-                    }
+    /// Lays out the content of each cell of `row` at its width.
+    fn layout_cells(&mut self, row: &Row, grid: &Grid) -> Vec<LaidOutCell> {
+        row.cells
+            .iter()
+            .map(|cell| {
+                let width = grid.span_width(cell.column, cell.span);
+                let mut flow = Flow::new(self.cx);
+                flow.block_contents(
+                    cell.node,
+                    &cell.style,
+                    0.0,
+                    (width - cell.horizontal_edges()).max(0.0),
+                );
+                let (canvas, content_height) = flow.finish();
+                LaidOutCell {
+                    canvas,
+                    content_height: content_height as f32,
+                    width,
                 }
-                paint.fills(Rect::new(cell_x, 0.0, width, height), &mut items);
-            }
-            previous_has_right_border = cell.border.right > 0.0;
-
-            let free = (height - cell.vertical_edges() - content_height).max(0.0);
-            let shift = match cell.style.vertical_align {
-                VerticalAlign::Middle => free / 2.0,
-                VerticalAlign::Bottom => free,
-                // Baseline alignment across cells is not implemented.
-                _ => 0.0,
-            };
-            canvas.into_items(
-                cell_x + cell.border.left + cell.padding.left,
-                cell.border.top + cell.padding.top + shift,
-                &mut items,
-            );
-        }
-        (height, items)
+            })
+            .collect()
     }
 }
 
-/// Where a row sits in its table, for collapsed borders.
-#[derive(Clone, Copy)]
-struct RowPosition {
-    first: bool,
-    last: bool,
-    /// The row above has a bottom border.
-    below_border: bool,
+/// Rows painted together as one slice: rows joined by cells spanning
+/// them, or a single row.
+struct RowBlock<'a> {
+    /// The index of the first row in the table.
+    first: usize,
+    /// The number of rows in the table.
+    total: usize,
+    rows: &'a [Row],
+    heights: &'a [f32],
+    coverage: &'a Coverage,
+}
+
+/// Which cell edges lie along each grid line, for collapsed borders: a
+/// border its neighbor already draws is left out.
+struct Coverage {
+    /// For each row and column: the cell covering it ends in that column
+    /// and has a right border.
+    right: Vec<Vec<bool>>,
+    /// For each row and column: the cell covering it ends in that row and
+    /// has a bottom border.
+    bottom: Vec<Vec<bool>>,
+}
+
+impl Coverage {
+    fn new(rows: &[Row], columns: usize) -> Self {
+        let mut right = vec![vec![false; columns]; rows.len()];
+        let mut bottom = vec![vec![false; columns]; rows.len()];
+        for (index, row) in rows.iter().enumerate() {
+            for cell in &row.cells {
+                let last_row = index + cell.row_span - 1;
+                let span = cell.column..(cell.column + cell.span).min(columns);
+                if let Some(last_column) = span.clone().last() {
+                    for row in &mut right[index..=last_row] {
+                        row[last_column] = cell.border.right > 0.0;
+                    }
+                }
+                bottom[last_row][span].fill(cell.border.bottom > 0.0);
+            }
+        }
+        Self { right, bottom }
+    }
+
+    /// Whether the cell left of `column` in row `row` draws the border
+    /// between them.
+    fn right_of(&self, row: usize, column: usize) -> bool {
+        column > 0 && self.right[row][column - 1]
+    }
+
+    /// Whether a cell above row `row` draws the border along the top of
+    /// the cell covering `columns`.
+    fn below(&self, row: usize, columns: Range<usize>) -> bool {
+        row > 0
+            && self.bottom[row - 1]
+                .get(columns)
+                .is_some_and(|edge| edge.iter().any(|&drawn| drawn))
+    }
+}
+
+impl RowBlock<'_> {
+    /// Paints the rows' backgrounds, then their cells. Returns the height
+    /// and the items, positioned relative to the canvas's left edge and
+    /// the top of the first row.
+    fn paint(
+        &self,
+        laid_out: Vec<Vec<LaidOutCell>>,
+        grid: &Grid,
+        content_x: f32,
+        edges: TableEdges,
+    ) -> (f32, Vec<Item>) {
+        let spacing = grid.spacing;
+        let mut tops = Vec::with_capacity(self.heights.len());
+        let mut y = 0.0;
+        for height in self.heights {
+            tops.push(y);
+            y += height + spacing;
+        }
+        let total_height = (y - spacing).max(0.0);
+        // The height of `count` rows from row `k` of the block.
+        let span_height = |k: usize, count: usize| {
+            self.heights[k..k + count].iter().sum::<f32>() + spacing * (count - 1) as f32
+        };
+
+        let mut items = Vec::new();
+        // Row backgrounds first: a cell spanning rows paints over the rows
+        // below its own.
+        for ((row, &top), &height) in self.rows.iter().zip(&tops).zip(self.heights) {
+            if !row.style.background_color.is_transparent() && !grid.widths.is_empty() {
+                let width = grid.total_width() - 2.0 * spacing;
+                items.push(Item::Fill(Fill {
+                    rect: Rect::new(content_x + spacing, top, width, height),
+                    color: row.style.background_color,
+                }));
+            }
+        }
+
+        let last_column = grid.widths.len();
+        for (k, (row, cells)) in self.rows.iter().zip(laid_out).enumerate() {
+            let index = self.first + k;
+            let top = tops[k];
+            for (cell, laid_out) in row.cells.iter().zip(cells) {
+                let cell_x = content_x + grid.starts.get(cell.column).copied().unwrap_or(0.0);
+                let height = span_height(k, cell.row_span);
+                let width = laid_out.width;
+
+                if let Some(mut paint) = BoxPaint::from_style(&cell.style) {
+                    if edges.collapse {
+                        // Borders shared with a neighbor or the table are
+                        // drawn once, by whoever comes first.
+                        let at_left = cell.column == 0;
+                        let at_right = cell.column + cell.span >= last_column;
+                        let at_bottom = index + cell.row_span >= self.total;
+                        let columns = cell.column..(cell.column + cell.span).min(last_column);
+                        let hidden = [
+                            (
+                                Side::Left,
+                                if at_left {
+                                    edges.left
+                                } else {
+                                    self.coverage.right_of(index, cell.column)
+                                },
+                            ),
+                            (
+                                Side::Top,
+                                if index == 0 {
+                                    edges.top
+                                } else {
+                                    self.coverage.below(index, columns)
+                                },
+                            ),
+                            (Side::Right, at_right && edges.right),
+                            (Side::Bottom, at_bottom && edges.bottom),
+                        ];
+                        for (side, hide) in hidden {
+                            if hide {
+                                paint = paint.without_border(side);
+                            }
+                        }
+                    }
+                    paint.fills(Rect::new(cell_x, top, width, height), &mut items);
+                }
+
+                let free = (height - cell.vertical_edges() - laid_out.content_height).max(0.0);
+                let shift = match cell.style.vertical_align {
+                    VerticalAlign::Middle => free / 2.0,
+                    VerticalAlign::Bottom => free,
+                    // Baseline alignment across cells is not implemented.
+                    _ => 0.0,
+                };
+                laid_out.canvas.into_items(
+                    cell_x + cell.border.left + cell.padding.left,
+                    top + cell.border.top + cell.padding.top + shift,
+                    &mut items,
+                );
+            }
+        }
+        (total_height, items)
+    }
+}
+
+/// Shortens row spans that reach past the end of their row group, as
+/// `rowspan=0` always does: a cell spans to the end of its group at most.
+fn clamp_row_spans(rows: &mut [Row]) {
+    // The index just past the last row of each row's group.
+    let mut ends = vec![rows.len(); rows.len()];
+    for i in (0..rows.len().saturating_sub(1)).rev() {
+        if rows[i + 1].group == rows[i].group {
+            ends[i] = ends[i + 1];
+        } else {
+            ends[i] = i + 1;
+        }
+    }
+    for (i, row) in rows.iter_mut().enumerate() {
+        for cell in &mut row.cells {
+            cell.row_span = cell.row_span.min(ends[i] - i);
+        }
+    }
+}
+
+/// The height of each row: its tallest cell that spans only it, or its
+/// `height`. Then cells spanning several rows that are taller than those
+/// rows make them taller, in proportion to their heights; shorter spans
+/// first, so that longer ones see the result.
+fn row_heights(rows: &[Row], laid_out: &[Vec<LaidOutCell>], spacing: f32) -> Vec<f32> {
+    let mut heights: Vec<f32> = rows
+        .iter()
+        .zip(laid_out)
+        .map(|(row, cells)| {
+            let tallest = row
+                .cells
+                .iter()
+                .zip(cells)
+                .filter(|(cell, _)| cell.row_span == 1)
+                .map(|(cell, laid_out)| cell.needed_height(laid_out))
+                .fold(0.0, f32::max);
+            match row.style.height {
+                Dimension::Pt(min) => tallest.max(min),
+                _ => tallest,
+            }
+        })
+        .collect();
+
+    let mut spanning: Vec<(usize, &Cell, &LaidOutCell)> = rows
+        .iter()
+        .zip(laid_out)
+        .enumerate()
+        .flat_map(|(index, (row, cells))| {
+            row.cells
+                .iter()
+                .zip(cells)
+                .filter(|(cell, _)| cell.row_span > 1)
+                .map(move |(cell, laid_out)| (index, cell, laid_out))
+        })
+        .collect();
+    spanning.sort_by_key(|(_, cell, _)| cell.row_span);
+    for (index, cell, laid_out) in spanning {
+        let spanned = &mut heights[index..index + cell.row_span];
+        let total: f32 = spanned.iter().sum();
+        let available = total + spacing * (cell.row_span - 1) as f32;
+        let extra = cell.needed_height(laid_out) - available;
+        if extra > 0.0 {
+            let count = spanned.len() as f32;
+            for height in spanned {
+                *height += if total > 0.0 {
+                    extra * *height / total
+                } else {
+                    extra / count
+                };
+            }
+        }
+    }
+    heights
+}
+
+/// Groups rows into blocks that cells spanning rows do not cross.
+fn row_blocks(rows: &[Row]) -> Vec<Range<usize>> {
+    let mut blocks = Vec::new();
+    let (mut start, mut end) = (0, 0);
+    for (index, row) in rows.iter().enumerate() {
+        end = row
+            .cells
+            .iter()
+            .map(|cell| index + cell.row_span)
+            .fold(end.max(index + 1), usize::max);
+        if end == index + 1 {
+            blocks.push(start..end);
+            start = end;
+        }
+    }
+    blocks
 }
 
 /// Assigns each cell its first column, skipping columns still occupied by

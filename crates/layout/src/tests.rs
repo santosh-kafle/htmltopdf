@@ -1126,3 +1126,98 @@ fn fixed_table_layout_ignores_the_content() {
     assert!(approx(run_with(page, "averyvery").origin.x, M + 50.0));
     assert!(approx(run_with(page, "c").origin.x, M + 175.0));
 }
+
+#[test]
+fn a_cell_spanning_rows_covers_them_and_grows_them() {
+    let pages = layout(
+        "<body style='margin:0'><table cellspacing=0 cellpadding=0>
+         <tr><td rowspan=2 style='background:red; vertical-align:bottom'>a<br>a<br>a<br>a</td>
+         <td style='background:blue'>b</td></tr>
+         <tr><td style='background:blue'>c</td></tr>
+         <tr><td>after</td></tr></table>",
+    );
+    let page = &pages[0];
+    let (pitch, _) = line_metrics();
+    let fills = fills(page);
+    let red = fills.iter().find(|f| f.color == RED).unwrap().rect;
+    let blue: Vec<Rect> = fills
+        .iter()
+        .filter(|f| f.color != RED)
+        .map(|f| f.rect)
+        .collect();
+    // Four lines tall, over both rows, which share the height equally.
+    assert!(approx(red.size.height, 4.0 * pitch), "{red:?}");
+    assert!(approx(blue[0].size.height, 2.0 * pitch), "{blue:?}");
+    assert!(approx(blue[1].origin.y, M + 2.0 * pitch));
+    assert!(approx(blue[1].size.height, 2.0 * pitch));
+    // The next row starts below the spanning cell.
+    assert!(run_with(page, "after").origin.y > M + 4.0 * pitch);
+    // `rowspan` rows are one slice: the cell's lines are in order and the
+    // cell is on one page.
+    assert_eq!(pages.len(), 1);
+}
+
+#[test]
+fn vertical_align_uses_the_whole_span() {
+    let pages = layout(
+        "<body style='margin:0'><table cellspacing=0 cellpadding=0>
+         <tr><td rowspan=2 style='vertical-align:bottom'>low</td><td>b</td></tr>
+         <tr><td>c</td></tr></table>",
+    );
+    let page = &pages[0];
+    assert!(approx(
+        run_with(page, "low").origin.y,
+        run_with(page, "c").origin.y
+    ));
+}
+
+#[test]
+fn rows_joined_by_a_rowspan_move_to_the_next_page_together() {
+    let (pitch, _) = line_metrics();
+    let table = "<table cellspacing=0 cellpadding=0>
+         <tr><td rowspan=2>span</td><td>one</td></tr><tr><td>two</td></tr></table>";
+    // Room for one row.
+    let pages = below_filler(1.5 * pitch, table);
+    assert_eq!(page_of(&pages, "one"), 1);
+    assert_eq!(page_of(&pages, "span"), 1);
+}
+
+#[test]
+fn rowspan_zero_and_overlong_spans_stop_at_the_row_group() {
+    let pages = layout(
+        "<body style='margin:0'><table cellspacing=0 cellpadding=0>
+         <tbody><tr><td rowspan=0>a</td><td>b</td></tr><tr><td>c</td></tr></tbody>
+         <tbody><tr><td>d</td><td rowspan=5>e</td></tr></tbody></table>",
+    );
+    let page = &pages[0];
+    // c shares b's column; d starts the new group in the first column.
+    assert!(approx(
+        run_with(page, "c").origin.x,
+        run_with(page, "b").origin.x
+    ));
+    assert!(approx(
+        run_with(page, "d").origin.x,
+        run_with(page, "a").origin.x
+    ));
+    assert!(approx(
+        run_with(page, "e").origin.x,
+        run_with(page, "b").origin.x
+    ));
+}
+
+#[test]
+fn collapsed_borders_beside_a_rowspan_are_drawn_once() {
+    let cell = "style='border:1pt solid red'";
+    let pages = layout(&format!(
+        "<table style='border-collapse:collapse'>
+         <tr><td rowspan=2 {cell}>a</td><td {cell}>b</td></tr><tr><td {cell}>c</td></tr>"
+    ));
+    let fills = fills(&pages[0]);
+    let vertical = fills
+        .iter()
+        .filter(|f| approx(f.rect.size.width, 1.0) && f.rect.size.height > 1.0)
+        .count();
+    // a's left and right, then only the right borders of b and c: their
+    // left borders are a's right one.
+    assert_eq!(vertical, 4, "{fills:?}");
+}

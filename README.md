@@ -49,10 +49,10 @@ maintained, and accepts the same command line.
   for standard input), and inside a stylesheet against the stylesheet.
 - **Tables.** Columns are sized to their content and to the widths given
   to cells and `<col>`s (columns with a width keep it; the others share
-  the rest), with `colspan`, cell
-  borders and backgrounds, and collapsed borders. Rows are never split
-  across pages, `<thead>` rows repeat at the top of every page, and a
-  header is never left alone at the bottom of a page.
+  the rest), with `colspan` and `rowspan`, cell borders and backgrounds,
+  and collapsed borders. Rows are never split across pages, nor are rows
+  joined by a `rowspan` cell; `<thead>` rows repeat at the top of every
+  page, and a header is never left alone at the bottom of a page.
 - **Pagination.** Pages break between lines and table rows; backgrounds and
   borders continue across the break. `@page { size; margin }` is honored.
   A box with `break-inside: avoid` moves to the next page whole when it
@@ -112,7 +112,6 @@ maintained, and accepts the same command line.
 
 Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
 floats and positioning, flexbox and grid, generated content (`::before`),
-row-spanning cells (they occupy their first row only),
 the `[section]` header variables (always empty), and the table of
 contents.
 
