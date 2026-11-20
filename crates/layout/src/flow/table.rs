@@ -12,23 +12,29 @@
 //! is taller, and rows joined by such cells form one slice, so they stay
 //! on one page.
 //!
+//! With `border-collapse: collapse`, the borders of cells, rows, row
+//! groups, columns and the table are resolved per grid edge; see
+//! [`collapse`].
+//!
 //! Not supported yet: `height` on the table and row groups (cells and rows
-//! take it as a minimum); the full collapsed border model (shared borders
-//! are drawn once, without conflict resolution).
+//! take it as a minimum).
+
+mod collapse;
 
 use std::ops::Range;
 use std::rc::Rc;
 
 use presswork_dom::NodeId;
 use presswork_style::{
-    BorderCollapse, BoxSizing, ComputedStyle, Dimension, Display, Side, Sides, TableLayout,
-    VerticalAlign,
+    BorderCollapse, BorderSide, BorderStyle, BoxSizing, Color, ColorValue, ComputedStyle,
+    Dimension, Display, Sides, TableLayout, VerticalAlign,
 };
 
 use super::boxes::BoxGeometry;
 use super::{BoxPaint, Canvas, Flow, RepeatedHeader};
 use crate::fragment::{Fill, Item};
 use crate::geometry::Rect;
+use collapse::{CollapsedBorders, TableBorders};
 
 struct Cell {
     node: NodeId,
@@ -83,8 +89,19 @@ struct TableParts {
     captions: Vec<(NodeId, ComputedStyle)>,
     /// Header rows first, footer rows last.
     rows: Vec<Row>,
-    /// The width each `<col>` gives its column, in column order.
-    columns: Vec<Dimension>,
+    /// The styles of the row groups, indexed by [`Row::group`].
+    groups: Vec<ComputedStyle>,
+    /// What the `<col>`s say of each column, in column order.
+    columns: Vec<ColumnElement>,
+    /// The columns of each `<colgroup>`, and its style.
+    column_groups: Vec<(Range<usize>, ComputedStyle)>,
+}
+
+/// A column from a `<col>`, or from a `<colgroup>` without any.
+struct ColumnElement {
+    width: Dimension,
+    /// The `<col>`'s style, for its borders; `None` for a group's column.
+    style: Option<ComputedStyle>,
 }
 
 /// What a column's cells and `<col>` ask of its width, for the automatic
@@ -107,6 +124,8 @@ struct Row {
     /// The row belongs to a header group and repeats on each page.
     header: bool,
     /// The row group it belongs to: cells cannot span rows across groups.
+    /// An index into [`TableParts::groups`], or `usize::MAX` for rows
+    /// outside any group.
     group: usize,
 }
 
@@ -166,17 +185,6 @@ impl Grid {
     }
 }
 
-/// Which outer borders of the table are drawn, for collapsing cell
-/// borders into them.
-#[derive(Clone, Copy)]
-struct TableEdges {
-    collapse: bool,
-    top: bool,
-    right: bool,
-    bottom: bool,
-    left: bool,
-}
-
 impl Flow<'_, '_> {
     /// Lays out the table `id` in a containing block whose content box
     /// starts at `x` and is `width` wide.
@@ -184,7 +192,9 @@ impl Flow<'_, '_> {
         let TableParts {
             captions,
             mut rows,
-            columns: col_widths,
+            groups,
+            columns: column_elements,
+            column_groups,
         } = self.collect_rows(id, style);
         for (caption, caption_style) in &captions {
             self.block(*caption, caption_style, x, width);
@@ -192,9 +202,36 @@ impl Flow<'_, '_> {
 
         clamp_row_spans(&mut rows);
         let columns = assign_columns(&mut rows);
+        let col_widths: Vec<Dimension> = column_elements.iter().map(|c| c.width).collect();
         let collapse = style.border_collapse == BorderCollapse::Collapse;
         let spacing = if collapse { 0.0 } else { style.border_spacing };
         let gaps = spacing * (columns as f32 + 1.0);
+
+        // With collapsed borders, cells and the table take half of each
+        // border along their edges, and the borders are drawn separately.
+        let collapsed = collapse.then(|| {
+            let parts = TableBorders {
+                table: style,
+                rows: &rows,
+                groups: &groups,
+                columns: &column_elements,
+                column_groups: &column_groups,
+            };
+            CollapsedBorders::resolve(&parts, columns)
+        });
+        let collapsed_style;
+        let style = match &collapsed {
+            Some(borders) => {
+                for (index, row) in rows.iter_mut().enumerate() {
+                    for cell in &mut row.cells {
+                        cell.border = borders.cell_borders(index, cell);
+                    }
+                }
+                collapsed_style = collapsed_table_style(style, borders.table_borders());
+                &collapsed_style
+            }
+            None => style,
+        };
 
         // The table's own box. Its content width is the grid's width.
         let probe = BoxGeometry::resolve(style, width, Some(0.0));
@@ -245,16 +282,6 @@ impl Flow<'_, '_> {
         let geometry = BoxGeometry::resolve(style, width, Some(grid.total_width()));
         let content_x = x + geometry.content_x();
 
-        let paint = BoxPaint::from_style(style);
-        let has = |side| paint.is_some_and(|paint| paint.has_border(side));
-        let table_edges = TableEdges {
-            collapse,
-            top: has(Side::Top),
-            right: has(Side::Right),
-            bottom: has(Side::Bottom),
-            left: has(Side::Left),
-        };
-
         let open = self.open_box(style, &geometry, x, false);
         self.settle_margin();
         self.y += f64::from(spacing);
@@ -264,7 +291,6 @@ impl Flow<'_, '_> {
             .map(|row| self.layout_cells(row, &grid))
             .collect();
         let heights = row_heights(&rows, &laid_out, spacing);
-        let coverage = Coverage::new(&rows, columns);
         let mut laid_out = laid_out.into_iter();
 
         let mut header_items = Vec::new();
@@ -273,13 +299,12 @@ impl Flow<'_, '_> {
         for block in row_blocks(&rows) {
             let rows_in_block = RowBlock {
                 first: block.start,
-                total: rows.len(),
                 rows: &rows[block.clone()],
                 heights: &heights[block.clone()],
-                coverage: &coverage,
+                collapsed: collapsed.as_ref(),
             };
             let cells = laid_out.by_ref().take(block.len()).collect();
-            let (height, items) = rows_in_block.paint(cells, &grid, content_x, table_edges);
+            let (height, items) = rows_in_block.paint(cells, &grid, content_x);
 
             let is_header = rows[block.start].header;
             if is_header {
@@ -320,7 +345,8 @@ impl Flow<'_, '_> {
         let styles = self.cx.styles;
         let mut captions = Vec::new();
         let mut columns = Vec::new();
-        let mut groups = 0;
+        let mut column_groups = Vec::new();
+        let mut groups = Vec::new();
         let (mut head, mut body, mut foot) = (Vec::new(), Vec::new(), Vec::new());
 
         let make_row = |row: NodeId, row_style: ComputedStyle, header: bool, group: usize| {
@@ -384,8 +410,24 @@ impl Flow<'_, '_> {
                     .children(child)
                     .filter(|&col| doc.element(col).is_some_and(|e| e.name == "col"))
                     .collect();
-                if element.name == "col" || cols.is_empty() {
-                    columns.extend(std::iter::repeat_n(child_style.width, span(child)));
+                let start = columns.len();
+                if element.name == "col" {
+                    let width = child_style.width;
+                    for _ in 0..span(child) {
+                        columns.push(ColumnElement {
+                            width,
+                            style: Some(child_style.clone()),
+                        });
+                    }
+                    continue;
+                }
+                if cols.is_empty() {
+                    for _ in 0..span(child) {
+                        columns.push(ColumnElement {
+                            width: child_style.width,
+                            style: None,
+                        });
+                    }
                 }
                 for col in cols {
                     let col_style = styles.style(doc, col, Some(&child_style));
@@ -394,8 +436,14 @@ impl Flow<'_, '_> {
                         Dimension::Auto => child_style.width,
                         width => width,
                     };
-                    columns.extend(std::iter::repeat_n(width, span(col)));
+                    for _ in 0..span(col) {
+                        columns.push(ColumnElement {
+                            width,
+                            style: Some(col_style.clone()),
+                        });
+                    }
                 }
+                column_groups.push((start..columns.len(), child_style));
                 continue;
             }
             match child_style.display {
@@ -409,16 +457,17 @@ impl Flow<'_, '_> {
                         Display::TableFooterGroup => &mut foot,
                         _ => &mut body,
                     };
-                    groups += 1;
+                    let index = groups.len();
                     for row in doc.children(child) {
                         if doc.element(row).is_none() {
                             continue;
                         }
                         let row_style = styles.style(doc, row, Some(&child_style));
                         if row_style.display == Display::TableRow {
-                            group.push(make_row(row, row_style, header, groups));
+                            group.push(make_row(row, row_style, header, index));
                         }
                     }
+                    groups.push(child_style);
                 }
                 _ => {}
             }
@@ -429,7 +478,9 @@ impl Flow<'_, '_> {
         TableParts {
             captions,
             rows: head,
+            groups,
             columns,
+            column_groups,
         }
     }
 
@@ -477,69 +528,22 @@ impl Flow<'_, '_> {
 struct RowBlock<'a> {
     /// The index of the first row in the table.
     first: usize,
-    /// The number of rows in the table.
-    total: usize,
     rows: &'a [Row],
     heights: &'a [f32],
-    coverage: &'a Coverage,
-}
-
-/// Which cell edges lie along each grid line, for collapsed borders: a
-/// border its neighbor already draws is left out.
-struct Coverage {
-    /// For each row and column: the cell covering it ends in that column
-    /// and has a right border.
-    right: Vec<Vec<bool>>,
-    /// For each row and column: the cell covering it ends in that row and
-    /// has a bottom border.
-    bottom: Vec<Vec<bool>>,
-}
-
-impl Coverage {
-    fn new(rows: &[Row], columns: usize) -> Self {
-        let mut right = vec![vec![false; columns]; rows.len()];
-        let mut bottom = vec![vec![false; columns]; rows.len()];
-        for (index, row) in rows.iter().enumerate() {
-            for cell in &row.cells {
-                let last_row = index + cell.row_span - 1;
-                let span = cell.column..(cell.column + cell.span).min(columns);
-                if let Some(last_column) = span.clone().last() {
-                    for row in &mut right[index..=last_row] {
-                        row[last_column] = cell.border.right > 0.0;
-                    }
-                }
-                bottom[last_row][span].fill(cell.border.bottom > 0.0);
-            }
-        }
-        Self { right, bottom }
-    }
-
-    /// Whether the cell left of `column` in row `row` draws the border
-    /// between them.
-    fn right_of(&self, row: usize, column: usize) -> bool {
-        column > 0 && self.right[row][column - 1]
-    }
-
-    /// Whether a cell above row `row` draws the border along the top of
-    /// the cell covering `columns`.
-    fn below(&self, row: usize, columns: Range<usize>) -> bool {
-        row > 0
-            && self.bottom[row - 1]
-                .get(columns)
-                .is_some_and(|edge| edge.iter().any(|&drawn| drawn))
-    }
+    /// The table's borders, if they collapse.
+    collapsed: Option<&'a CollapsedBorders>,
 }
 
 impl RowBlock<'_> {
-    /// Paints the rows' backgrounds, then their cells. Returns the height
-    /// and the items, positioned relative to the canvas's left edge and
-    /// the top of the first row.
+    /// Paints the rows' backgrounds, the cells' backgrounds and borders,
+    /// then the cells' content. Returns the height and the items,
+    /// positioned relative to the canvas's left edge and the top of the
+    /// first row.
     fn paint(
         &self,
         laid_out: Vec<Vec<LaidOutCell>>,
         grid: &Grid,
         content_x: f32,
-        edges: TableEdges,
     ) -> (f32, Vec<Item>) {
         let spacing = grid.spacing;
         let mut tops = Vec::with_capacity(self.heights.len());
@@ -553,6 +557,7 @@ impl RowBlock<'_> {
         let span_height = |k: usize, count: usize| {
             self.heights[k..k + count].iter().sum::<f32>() + spacing * (count - 1) as f32
         };
+        let cell_x = |cell: &Cell| content_x + grid.starts.get(cell.column).copied().unwrap_or(0.0);
 
         let mut items = Vec::new();
         // Row backgrounds first: a cell spanning rows paints over the rows
@@ -567,52 +572,40 @@ impl RowBlock<'_> {
             }
         }
 
-        let last_column = grid.widths.len();
-        for (k, (row, cells)) in self.rows.iter().zip(laid_out).enumerate() {
-            let index = self.first + k;
-            let top = tops[k];
+        // Cell backgrounds, and borders unless they collapse.
+        for (k, (row, cells)) in self.rows.iter().zip(&laid_out).enumerate() {
             for (cell, laid_out) in row.cells.iter().zip(cells) {
-                let cell_x = content_x + grid.starts.get(cell.column).copied().unwrap_or(0.0);
-                let height = span_height(k, cell.row_span);
-                let width = laid_out.width;
-
-                if let Some(mut paint) = BoxPaint::from_style(&cell.style) {
-                    if edges.collapse {
-                        // Borders shared with a neighbor or the table are
-                        // drawn once, by whoever comes first.
-                        let at_left = cell.column == 0;
-                        let at_right = cell.column + cell.span >= last_column;
-                        let at_bottom = index + cell.row_span >= self.total;
-                        let columns = cell.column..(cell.column + cell.span).min(last_column);
-                        let hidden = [
-                            (
-                                Side::Left,
-                                if at_left {
-                                    edges.left
-                                } else {
-                                    self.coverage.right_of(index, cell.column)
-                                },
-                            ),
-                            (
-                                Side::Top,
-                                if index == 0 {
-                                    edges.top
-                                } else {
-                                    self.coverage.below(index, columns)
-                                },
-                            ),
-                            (Side::Right, at_right && edges.right),
-                            (Side::Bottom, at_bottom && edges.bottom),
-                        ];
-                        for (side, hide) in hidden {
-                            if hide {
-                                paint = paint.without_border(side);
-                            }
-                        }
+                let paint = match self.collapsed {
+                    Some(_) => {
+                        (!cell.style.background_color.is_transparent()).then_some(BoxPaint {
+                            background: cell.style.background_color,
+                            ..BoxPaint::INVISIBLE
+                        })
                     }
-                    paint.fills(Rect::new(cell_x, top, width, height), &mut items);
+                    None => BoxPaint::from_style(&cell.style),
+                };
+                if let Some(paint) = paint {
+                    let rect = Rect::new(
+                        cell_x(cell),
+                        tops[k],
+                        laid_out.width,
+                        span_height(k, cell.row_span),
+                    );
+                    paint.fills(rect, &mut items);
                 }
+            }
+        }
 
+        if let Some(borders) = self.collapsed {
+            let mut xs: Vec<f32> = grid.starts.iter().map(|start| content_x + start).collect();
+            xs.push(content_x + grid.total_width());
+            let rows = self.first..self.first + self.rows.len();
+            borders.paint(rows, &tops, self.heights, &xs, &mut items);
+        }
+
+        for (k, (row, cells)) in self.rows.iter().zip(laid_out).enumerate() {
+            for (cell, laid_out) in row.cells.iter().zip(cells) {
+                let height = span_height(k, cell.row_span);
                 let free = (height - cell.vertical_edges() - laid_out.content_height).max(0.0);
                 let shift = match cell.style.vertical_align {
                     VerticalAlign::Middle => free / 2.0,
@@ -621,14 +614,28 @@ impl RowBlock<'_> {
                     _ => 0.0,
                 };
                 laid_out.canvas.into_items(
-                    cell_x + cell.border.left + cell.padding.left,
-                    top + cell.border.top + cell.padding.top + shift,
+                    cell_x(cell) + cell.border.left + cell.padding.left,
+                    tops[k] + cell.border.top + cell.padding.top + shift,
                     &mut items,
                 );
             }
         }
         (total_height, items)
     }
+}
+
+/// The style a table with collapsed borders lays out its own box with: no
+/// padding (section 17.6.2), and `borders` (half its outer collapsed
+/// borders) as transparent borders, which take room without being drawn.
+fn collapsed_table_style(style: &ComputedStyle, borders: Sides<f32>) -> ComputedStyle {
+    let mut style = style.clone();
+    style.padding = Sides::uniform(Dimension::ZERO);
+    style.border = borders.map(|width| BorderSide {
+        width,
+        style: BorderStyle::Solid,
+        color: ColorValue::Color(Color::TRANSPARENT),
+    });
+    style
 }
 
 /// Shortens row spans that reach past the end of their row group, as

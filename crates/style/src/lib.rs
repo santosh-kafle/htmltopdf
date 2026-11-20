@@ -29,4 +29,4 @@ pub use properties::{
     TextTransform, VerticalAlign, WhiteSpace,
 };
 pub use stylesheet::{PageRule, PageSizeValue};
-pub use values::{Color, Dimension, Length, Side, Sides};
+pub use values::{Color, ColorValue, Dimension, Length, Side, Sides};

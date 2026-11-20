@@ -50,7 +50,8 @@ maintained, and accepts the same command line.
 - **Tables.** Columns are sized to their content and to the widths given
   to cells and `<col>`s (columns with a width keep it; the others share
   the rest), with `colspan` and `rowspan`, cell borders and backgrounds,
-  and collapsed borders. Rows are never split across pages, nor are rows
+  and collapsed borders, where the borders of cells, rows, row groups,
+  columns and the table meet and the strongest wins, as in browsers. Rows are never split across pages, nor are rows
   joined by a `rowspan` cell; `<thead>` rows repeat at the top of every
   page, and a header is never left alone at the bottom of a page.
 - **Pagination.** Pages break between lines and table rows; backgrounds and

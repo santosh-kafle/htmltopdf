@@ -135,13 +135,6 @@ impl BoxPaint {
         self
     }
 
-    /// Whether the border on `side` is drawn.
-    pub fn has_border(&self, side: Side) -> bool {
-        self.border
-            .iter()
-            .any(|(s, width, color)| *s == side && *width > 0.0 && !color.is_transparent())
-    }
-
     /// Appends the fills for a box whose border box is `rect`.
     pub fn fills(&self, rect: Rect, out: &mut Vec<Item>) {
         let Rect { origin, size } = rect;

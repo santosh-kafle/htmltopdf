@@ -344,20 +344,53 @@ fn cell_borders_and_backgrounds_fill_the_row() {
     );
 }
 
+/// The distinct rectangles of the fills on a page: a line drawn twice at
+/// the same place counts once.
+fn distinct_fills(page: &Page) -> Vec<Rect> {
+    let mut rects: Vec<Rect> = Vec::new();
+    for fill in fills(page) {
+        let same = |r: &Rect| {
+            approx(r.origin.x, fill.rect.origin.x)
+                && approx(r.origin.y, fill.rect.origin.y)
+                && approx(r.size.width, fill.rect.size.width)
+                && approx(r.size.height, fill.rect.size.height)
+        };
+        if !rects.iter().any(same) {
+            rects.push(fill.rect);
+        }
+    }
+    rects
+}
+
 #[test]
 fn collapsed_borders_are_drawn_once() {
     let html = |collapse: &str| {
         format!(
-            "<style>table {{ border-collapse: {collapse}; border-spacing: 0 }}
+            "<body style='margin:0'><style>table {{ border-collapse: {collapse}; border-spacing: 0 }}
              td {{ border: 1pt solid red }}</style>
              <table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>"
         )
     };
-    let separate = fills(&layout(&html("separate"))[0]).len();
-    let collapsed = fills(&layout(&html("collapse"))[0]).len();
-    assert_eq!(separate, 16);
-    // Shared edges are drawn by one cell only: 16 - 2 vertical - 2 horizontal.
-    assert_eq!(collapsed, 12);
+    assert_eq!(fills(&layout(&html("separate"))[0]).len(), 16);
+    let pages = layout(&html("collapse"));
+    let page = &pages[0];
+    let lines = distinct_fills(page);
+    // Three vertical lines in each of two rows, three horizontal lines in
+    // each of two columns: shared edges are one line, centered on the
+    // grid line, with half of it inside each cell.
+    assert_eq!(lines.len(), 12, "{lines:?}");
+    let (a, b) = (run_with(page, "a"), run_with(page, "b"));
+    // The table's border box starts at the page margin and holds half the
+    // left line; the cell the other half, then its 1px (0.75pt) padding.
+    assert!(approx(a.origin.x, M + 0.5 + 0.5 + 0.75), "{a:?}");
+    let middle = lines
+        .iter()
+        .find(|r| r.size.width == 1.0 && r.origin.x > a.origin.x && r.origin.x < b.origin.x)
+        .unwrap();
+    assert!(
+        approx(middle.origin.x + 1.0 + 0.75, b.origin.x),
+        "{middle:?} {b:?}"
+    );
 }
 
 #[test]
@@ -1212,12 +1245,97 @@ fn collapsed_borders_beside_a_rowspan_are_drawn_once() {
         "<table style='border-collapse:collapse'>
          <tr><td rowspan=2 {cell}>a</td><td {cell}>b</td></tr><tr><td {cell}>c</td></tr>"
     ));
-    let fills = fills(&pages[0]);
-    let vertical = fills
+    let lines = distinct_fills(&pages[0]);
+    let vertical: Vec<&Rect> = lines
         .iter()
-        .filter(|f| approx(f.rect.size.width, 1.0) && f.rect.size.height > 1.0)
-        .count();
-    // a's left and right, then only the right borders of b and c: their
-    // left borders are a's right one.
-    assert_eq!(vertical, 4, "{fills:?}");
+        .filter(|r| approx(r.size.width, 1.0) && r.size.height > 1.0)
+        .collect();
+    // Three vertical lines (left of a, between a and b/c, right), each in
+    // two row segments that meet with no gap, overlapping only where they
+    // cross the 1pt horizontal line between the rows.
+    let mut xs: Vec<f32> = vertical.iter().map(|r| r.origin.x).collect();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup_by(|a, b| approx(*a, *b));
+    assert_eq!(xs.len(), 3, "{vertical:?}");
+    for x in xs {
+        let at: Vec<_> = vertical.iter().filter(|r| approx(r.origin.x, x)).collect();
+        assert_eq!(at.len(), 2);
+        let first_bottom = at[0].origin.y + at[0].size.height;
+        assert!(at[1].origin.y <= first_bottom && first_bottom <= at[1].origin.y + 1.01);
+    }
+    // No line between a's two rows.
+    let horizontal = lines.iter().filter(|r| approx(r.size.height, 1.0)).count();
+    assert_eq!(horizontal, 5, "{lines:?}");
+}
+
+const BLUE: Color = Color::rgb(0, 0, 255);
+
+/// The lines of `color` on the first page: (width, height) of each.
+fn lines_of(pages: &[Page], color: Color) -> Vec<Rect> {
+    distinct_fills(&pages[0])
+        .into_iter()
+        .filter(|rect| {
+            fills(&pages[0])
+                .iter()
+                .any(|f| f.rect == *rect && f.color == color)
+        })
+        .collect()
+}
+
+#[test]
+fn collapsed_tables_draw_row_and_group_borders() {
+    let html = |collapse: &str| {
+        format!(
+            "<style>table {{ border-collapse: {collapse} }}
+             tr {{ border-bottom: 2pt solid red }} tbody {{ border-top: 3pt solid blue }}</style>
+             <table><thead><tr><th>h</th><th>h</th></tr></thead>
+             <tbody><tr><td>a</td><td>b</td></tr></tbody></table>"
+        )
+    };
+    let pages = layout(&html("collapse"));
+    // The header row's bottom edge is the body's top: the wider blue
+    // border wins it, over both columns. The body row's bottom is red.
+    let blue = lines_of(&pages, BLUE);
+    assert_eq!(blue.len(), 2, "{blue:?}");
+    assert!(blue.iter().all(|r| approx(r.size.height, 3.0)));
+    let red = lines_of(&pages, RED);
+    assert_eq!(red.len(), 2, "{red:?}");
+    assert!(red.iter().all(|r| approx(r.size.height, 2.0)));
+    // Separated borders: rows and groups have none.
+    assert_eq!(fills(&layout(&html("separate"))[0]), []);
+}
+
+#[test]
+fn the_widest_border_wins_a_shared_edge() {
+    let pages = layout(
+        "<table style='border-collapse:collapse; border:3pt solid blue'>
+         <col style='border-right:2pt solid blue'>
+         <tr><td style='border:1pt solid red'>a</td><td style='border:1pt solid red'>b</td>
+         <td style='border:1pt solid red; border-bottom:hidden'>c</td></tr></table>",
+    );
+    let red = lines_of(&pages, RED);
+    let blue = lines_of(&pages, BLUE);
+    // Outside: the table's 3pt lines (left, top in each of the three
+    // columns, bottom of a and b, right). Between a and b: the column's
+    // 2pt line. Only the line between b and c is the cells' 1pt red; c's
+    // bottom is hidden, which suppresses the table's border there.
+    assert_eq!(red.len(), 1, "{red:?}");
+    assert!(approx(red[0].size.width, 1.0));
+    let mut vertical: Vec<&Rect> = blue
+        .iter()
+        .filter(|r| r.size.height > r.size.width)
+        .collect();
+    vertical.sort_by(|a, b| a.origin.x.total_cmp(&b.origin.x));
+    let widths: Vec<f32> = vertical.iter().map(|r| r.size.width).collect();
+    assert_eq!(widths, [3.0, 2.0, 3.0], "{blue:?}");
+    let horizontal: Vec<&Rect> = blue
+        .iter()
+        .filter(|r| r.size.width > r.size.height)
+        .collect();
+    let top = horizontal
+        .iter()
+        .map(|r| r.origin.y)
+        .fold(f32::MAX, f32::min);
+    let bottom = horizontal.iter().filter(|r| r.origin.y > top + 1.0).count();
+    assert_eq!(bottom, 2, "{blue:?}");
 }
