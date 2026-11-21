@@ -28,6 +28,9 @@ maintained, and accepts the same command line.
   - boxes: `display`, `margin`, `padding`, `border` (drawn solid), `width`,
     `max-width`, `height`, `min-height`, `max-height`, `box-sizing`,
     `background-color`
+  - inline elements: `background-color`, `border`, `padding` and
+    horizontal `margin` on `<span>`, `<a>`, `<strong>` and the like, drawn
+    on each line the element covers
   - images: `width`, `height`, `max-width`, `max-height`, `vertical-align`
   - tables: `border-collapse`, `border-spacing`, `table-layout`,
     `vertical-align`, `height` on cells and rows

@@ -592,7 +592,11 @@ impl<'c, 'a> Flow<'c, 'a> {
                         Display::Inline if replaced::is_image(doc, child) => {
                             self.inline_image(child, &child_style, width, inline);
                         }
-                        Display::Inline => self.children(child, &child_style, x, width, inline),
+                        Display::Inline => {
+                            inline.open_element(child, &child_style, width);
+                            self.children(child, &child_style, x, width, inline);
+                            inline.close_element(child);
+                        }
                         _ => {
                             self.paragraph(std::mem::take(inline), style, x, width);
                             self.block(child, &child_style, x, width);

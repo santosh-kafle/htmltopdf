@@ -5,17 +5,17 @@ use std::sync::Arc;
 
 use parley::{
     Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, IndentOptions, InlineBox,
-    InlineBoxKind, Language, Layout, LineHeight as ParleyLineHeight, PositionedLayoutItem,
-    StyleProperty, TextWrapMode, VerticalAlign as ParleyVerticalAlign,
+    InlineBoxKind, Language, Layout, LineBreakContext, LineHeight as ParleyLineHeight,
+    PositionedLayoutItem, StyleProperty, TextWrapMode, VerticalAlign as ParleyVerticalAlign,
 };
 use presswork_dom::{Document, NodeId};
 use presswork_style::{
-    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, TextAlign, TextDecorationLine,
-    TextDecorations, TextTransform, VerticalAlign, WhiteSpace,
+    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, Side, Sides, TextAlign,
+    TextDecorationLine, TextDecorations, TextTransform, VerticalAlign, WhiteSpace,
 };
 use read_fonts::{FontRef, TableProvider};
 
-use super::{Context, Flow, GenericFonts, WebFonts};
+use super::{BoxPaint, Context, Flow, GenericFonts, WebFonts};
 use crate::fragment::{Fill, FontData, Glyph, Item, TextRun};
 use crate::geometry::{Point, Rect};
 
@@ -47,6 +47,50 @@ pub(super) struct Inline {
     /// The paragraph starts its block container, so `text-indent`
     /// applies to it.
     first: bool,
+    /// Inline elements with a background, borders, or horizontal
+    /// margins or padding, in tree order.
+    elements: Vec<InlineElement>,
+    /// Elements opened with no content after them yet. Their start is
+    /// placed (and their start spacer pushed) just before the next
+    /// content, so that a collapsible space between them and the text
+    /// before stays outside, where the line can break.
+    pending: Vec<usize>,
+    /// Byte offsets of the U+FFFC characters that are spacers rather
+    /// than images, ascending.
+    spacers: Vec<usize>,
+}
+
+/// An inline element whose box is painted or takes horizontal space.
+///
+/// Its left margin, border and padding are a spacer box (an empty inline
+/// object) before its content, the right ones a spacer after it. Its
+/// background and borders are painted per line, around its content on
+/// that line, from its font's ascent and descent plus the vertical
+/// padding and borders, which do not affect the line height (CSS 2.1
+/// section 10.8.1).
+struct InlineElement {
+    node: NodeId,
+    style: ComputedStyle,
+    /// From its start spacer (or first character) to the end of its end
+    /// spacer (or last character). [`OPEN`] until started or ended: an
+    /// element left open by a block inside it extends to the end.
+    range: Range<usize>,
+    paint: Option<BoxPaint>,
+    /// Only the left and right margins are used; negative ones count as
+    /// zero.
+    margin: Sides<f32>,
+    border: Sides<f32>,
+    padding: Sides<f32>,
+}
+
+impl InlineElement {
+    fn start_width(&self) -> f32 {
+        self.margin.left + self.border.left + self.padding.left
+    }
+
+    fn end_width(&self) -> f32 {
+        self.margin.right + self.border.right + self.padding.right
+    }
 }
 
 /// An atomic box laid out inline, like a character: an image.
@@ -64,7 +108,13 @@ pub(super) struct InlineObject {
     pub vertical_align: VerticalAlign,
     /// Content relative to the top-left of the margin box.
     pub items: Vec<Item>,
+    /// The left or right edges of an inline element: no break between
+    /// it and the text next to it.
+    spacer: bool,
 }
+
+/// The start or end of an inline element not yet placed.
+const OPEN: usize = usize::MAX;
 
 /// Tab stops in preformatted text, in characters.
 const TAB_SIZE: usize = 8;
@@ -87,6 +137,14 @@ impl InlineObject {
             min_width,
             vertical_align,
             items,
+            spacer: false,
+        }
+    }
+
+    fn spacer(width: f32) -> Self {
+        Self {
+            spacer: true,
+            ..Self::new(width, 0.0, width, VerticalAlign::Baseline, Vec::new())
         }
     }
 }
@@ -104,10 +162,17 @@ impl Inline {
     /// Appends text, applying the `white-space` rules of `style`.
     pub fn push_text(&mut self, text: &str, style: &ComputedStyle) {
         let white_space = style.white_space;
-        let start = self.text.len();
+        let mut start = self.text.len();
         let transformed = self.transform(text, style.text_transform);
         let mut chars = transformed.chars().peekable();
         while let Some(ch) = chars.next() {
+            let collapsible = ch.is_ascii_whitespace() && white_space.collapses_spaces();
+            if !collapsible && !self.pending.is_empty() && ch != '\r' {
+                // Elements start before their first content.
+                self.push_span(start, style);
+                self.start_pending();
+                start = self.text.len();
+            }
             match ch {
                 '\r' if chars.peek() == Some(&'\n') => {}
                 '\n' | '\r' if white_space.preserves_newlines() => self.push_newline(),
@@ -120,20 +185,134 @@ impl Inline {
                     let spaces = TAB_SIZE - column % TAB_SIZE;
                     self.text.extend(std::iter::repeat_n(' ', spaces));
                 }
-                _ if ch.is_ascii_whitespace() && white_space.collapses_spaces() => {
-                    let after_space = self.text.is_empty()
-                        || self.text.ends_with(' ')
-                        || self.text.ends_with('\n');
-                    if !after_space {
+                _ if collapsible => {
+                    if !matches!(self.last_char(), None | Some(' ' | '\n')) {
                         self.text.push(' ');
                     }
                 }
                 _ => self.text.push(ch),
             }
         }
+        self.push_span(start, style);
+    }
+
+    /// Gives the text from `start` to the end the style `style`.
+    fn push_span(&mut self, start: usize, style: &ComputedStyle) {
         if self.text.len() > start {
             self.spans.push((start..self.text.len(), style.clone()));
         }
+    }
+
+    /// The last character of the text, not counting spacers.
+    fn last_char(&self) -> Option<char> {
+        let mut end = self.text.len();
+        let mut spacers = self.spacers.iter().rev().peekable();
+        loop {
+            let ch = self.text[..end].chars().next_back()?;
+            let start = end - ch.len_utf8();
+            if spacers.peek() == Some(&&start) {
+                spacers.next();
+                end = start;
+            } else {
+                return Some(ch);
+            }
+        }
+    }
+
+    /// Starts an inline element with `style`, if it paints a box or takes
+    /// horizontal space; percentages are of `containing_width`. Its
+    /// content follows; [`Self::close_element`] ends it.
+    pub fn open_element(&mut self, node: NodeId, style: &ComputedStyle, containing_width: f32) {
+        let paint = BoxPaint::from_style(style);
+        let margin = style
+            .margin
+            .map(|m| m.resolve(containing_width).unwrap_or(0.0).max(0.0));
+        let padding = style
+            .padding
+            .map(|p| p.resolve(containing_width).unwrap_or(0.0).max(0.0));
+        let border = style.border_widths();
+        let element = InlineElement {
+            node,
+            style: style.clone(),
+            range: OPEN..OPEN,
+            paint,
+            margin,
+            border,
+            padding,
+        };
+        if paint.is_none() && element.start_width() <= 0.0 && element.end_width() <= 0.0 {
+            return;
+        }
+        self.pending.push(self.elements.len());
+        self.elements.push(element);
+    }
+
+    /// Ends the inline element `node`, if [`Self::open_element`] started
+    /// it in this paragraph: a block inside the element splits the
+    /// paragraph, and the part after the block is not painted.
+    pub fn close_element(&mut self, node: NodeId) {
+        let Some(index) = self.elements.iter().rposition(|e| e.node == node) else {
+            return;
+        };
+        if self.pending.contains(&index) {
+            // Empty: still painted, and still takes its space.
+            self.start_pending();
+        }
+        let width = self.elements[index].end_width();
+        if width > 0.0 {
+            // A space at the end stays outside, after the spacer, so that
+            // the spacer does not move to the next line without the text.
+            let space = self.pop_collapsible_space();
+            let style = self.elements[index].style.clone();
+            self.push_object(InlineObject::spacer(width), &style);
+            self.elements[index].range.end = self.text.len();
+            if let Some(style) = space {
+                let start = self.text.len();
+                self.text.push(' ');
+                self.push_span(start, &style);
+            }
+        } else {
+            self.elements[index].range.end = self.text.len();
+        }
+    }
+
+    /// Starts the pending elements at the end of the text, pushing their
+    /// start spacers.
+    fn start_pending(&mut self) {
+        for index in std::mem::take(&mut self.pending) {
+            self.elements[index].range.start = self.text.len();
+            let width = self.elements[index].start_width();
+            if width > 0.0 {
+                let style = self.elements[index].style.clone();
+                self.push_object(InlineObject::spacer(width), &style);
+            }
+        }
+    }
+
+    /// Removes a collapsible space at the end of the text, returning its
+    /// style.
+    fn pop_collapsible_space(&mut self) -> Option<ComputedStyle> {
+        let (range, style) = self.spans.last()?;
+        if !self.text.ends_with(' ')
+            || range.end != self.text.len()
+            || !style.white_space.collapses_spaces()
+        {
+            return None;
+        }
+        let style = style.clone();
+        self.text.pop();
+        let end = self.text.len();
+        self.spans.retain_mut(|(range, _)| {
+            range.end = range.end.min(end);
+            range.start < range.end
+        });
+        for element in &mut self.elements {
+            if element.range.end != OPEN {
+                element.range.start = element.range.start.min(end);
+                element.range.end = element.range.end.min(end);
+            }
+        }
+        Some(style)
     }
 
     /// Applies `text-transform` to `text`, which follows the text gathered
@@ -145,7 +324,7 @@ impl Inline {
             TextTransform::Uppercase => text.to_uppercase(),
             TextTransform::Lowercase => text.to_lowercase(),
             TextTransform::Capitalize => {
-                let mut in_word = self.text.chars().next_back().is_some_and(is_word_char);
+                let mut in_word = self.last_char().is_some_and(is_word_char);
                 let mut out = String::with_capacity(text.len());
                 for ch in text.chars() {
                     if !in_word && ch.is_alphabetic() {
@@ -162,14 +341,23 @@ impl Inline {
 
     /// Appends a forced line break (`<br>`).
     pub fn push_break(&mut self, style: &ComputedStyle) {
+        self.start_pending();
         self.push_newline();
         let end = self.text.len();
         self.spans.push((end - 1..end, style.clone()));
     }
 
     /// Appends an atomic inline box. Spaces around it are kept.
-    pub fn push_box(&mut self, mut object: InlineObject, style: &ComputedStyle) {
+    pub fn push_box(&mut self, object: InlineObject, style: &ComputedStyle) {
+        self.start_pending();
+        self.push_object(object, style);
+    }
+
+    fn push_object(&mut self, mut object: InlineObject, style: &ComputedStyle) {
         object.index = self.text.len();
+        if object.spacer {
+            self.spacers.push(object.index);
+        }
         self.text.push(OBJECT_REPLACEMENT);
         self.spans
             .push((object.index..self.text.len(), style.clone()));
@@ -270,6 +458,9 @@ impl Context<'_> {
         }
 
         let mut builder = self.texts.ranged_builder(self.fonts, text, 1.0, false);
+        if boxes.iter().any(|object| object.spacer) {
+            builder.set_line_break_override(Some(&keep_objects_with_text));
+        }
         for property in text_properties(self.generics, &self.web_fonts, style) {
             builder.push_default(property);
         }
@@ -301,6 +492,7 @@ impl Flow<'_, '_> {
         }
         let text: Arc<str> = inline.text.into();
         let boxes = inline.boxes;
+        let elements = inline.elements;
         let mut layout = self.cx.shape(&text, style, &inline.spans, &boxes);
         if inline.first {
             let indent = style.text_indent;
@@ -349,6 +541,7 @@ impl Flow<'_, '_> {
             let top = metrics.block_min_coord;
             let mut items = Vec::new();
             let mut cursor = ClusterCursor::default();
+            let mut pieces = LinePieces::default();
             let count = line.items().count();
             for (position, item) in line.items().enumerate() {
                 match item {
@@ -358,6 +551,9 @@ impl Flow<'_, '_> {
                             y: run.baseline() - top,
                         };
                         let text_run = text_run(&run, origin, &text, &mut cursor);
+                        if !elements.is_empty() {
+                            pieces.add_run(&run, &text_run);
+                        }
                         let decorations = run.style().brush.decorations;
                         if decorations.is_empty() {
                             items.push(Item::Text(text_run));
@@ -376,6 +572,12 @@ impl Flow<'_, '_> {
                     }
                     PositionedLayoutItem::InlineBox(placed) => {
                         let object = &boxes[placed.id as usize];
+                        pieces.pieces.push(Piece {
+                            text: object.index..object.index + OBJECT_REPLACEMENT.len_utf8(),
+                            x: x + placed.x,
+                            width: placed.width,
+                            space: false,
+                        });
                         items.extend(
                             object
                                 .items
@@ -385,6 +587,14 @@ impl Flow<'_, '_> {
                         );
                     }
                 }
+            }
+            if !elements.is_empty() {
+                let baseline = metrics.baseline - top;
+                let mut boxes = Vec::new();
+                for element in &elements {
+                    pieces.paint(element, &text, baseline, &mut boxes);
+                }
+                items.splice(0..0, boxes);
             }
             if index == 0
                 && let Some(marker) = &marker
@@ -541,6 +751,140 @@ fn trailing_space(run: &TextRun) -> f32 {
         })
         .map(|glyph| glyph.advance)
         .sum()
+}
+
+/// No soft wrap opportunity between an inline object and the text right
+/// next to it, so that an element's padding stays with its first and last
+/// characters. Applied only to paragraphs with spacers: it also keeps
+/// images with text they touch, where browsers would break.
+fn keep_objects_with_text(cx: LineBreakContext) -> Option<bool> {
+    let text = |ch: char| !ch.is_whitespace();
+    let joined = (cx.before == OBJECT_REPLACEMENT && text(cx.after))
+        || (cx.after == OBJECT_REPLACEMENT && text(cx.before));
+    joined.then_some(false)
+}
+
+/// A glyph cluster or inline object on a line.
+struct Piece {
+    /// The text it stands for.
+    text: Range<usize>,
+    /// Left edge relative to the canvas, and advance.
+    x: f32,
+    width: f32,
+    /// Whitespace, not painted under at the end of a line.
+    space: bool,
+}
+
+/// What an inline element's box on a line is sized from: the clusters
+/// and objects of the line, and the font metrics of its text runs.
+#[derive(Default)]
+struct LinePieces {
+    pieces: Vec<Piece>,
+    /// Text range, primary-font ascent and descent, and font size of
+    /// each glyph run.
+    runs: Vec<(Range<usize>, f32, f32, f32)>,
+}
+
+impl LinePieces {
+    fn add_run(&mut self, run: &GlyphRun<'_, Ink>, text_run: &TextRun) {
+        let mut x = text_run.origin.x;
+        let mut range: Option<Range<usize>> = None;
+        for glyph in &text_run.glyphs {
+            let cluster = glyph.text_range.clone();
+            let chars = &text_run.text[cluster.clone()];
+            self.pieces.push(Piece {
+                text: cluster.clone(),
+                x,
+                width: glyph.advance,
+                space: !chars.is_empty() && chars.chars().all(char::is_whitespace),
+            });
+            x += glyph.advance;
+            range = Some(match range {
+                None => cluster,
+                Some(r) => r.start.min(cluster.start)..r.end.max(cluster.end),
+            });
+        }
+        if let Some(range) = range {
+            let metrics = run.span_metrics();
+            let font_size = run.run().font_size();
+            self.runs
+                .push((range, metrics.ascent, metrics.descent, font_size));
+        }
+    }
+
+    /// Appends the background and borders of `element`'s box on this
+    /// line, if any of it is here. `baseline` is relative to the line's
+    /// top.
+    fn paint(&self, element: &InlineElement, text: &str, baseline: f32, out: &mut Vec<Item>) {
+        let Some(paint) = element.paint else {
+            return;
+        };
+        let range = element.range.start..element.range.end.min(text.len());
+        let Some(last) = text.get(range.clone()).and_then(|t| t.chars().next_back()) else {
+            return;
+        };
+        let last = range.end - last.len_utf8();
+        let inside: Vec<&Piece> = self
+            .pieces
+            .iter()
+            .filter(|piece| range.contains(&piece.text.start))
+            .collect();
+        if inside.is_empty() {
+            return;
+        }
+        let first = inside.iter().any(|piece| piece.text.start == range.start);
+        let last = inside.iter().any(|piece| piece.text.contains(&last));
+        // Spaces at the end of the line hang outside the box.
+        let content_end = self
+            .pieces
+            .iter()
+            .filter(|piece| !piece.space)
+            .map(|piece| piece.x + piece.width)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let shown = inside
+            .iter()
+            .filter(|piece| !piece.space || piece.x + piece.width <= content_end);
+        let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+        for piece in shown {
+            left = left.min(piece.x);
+            right = right.max(piece.x + piece.width);
+        }
+        if left > right {
+            return;
+        }
+        if first {
+            left += element.margin.left;
+        }
+        if last {
+            right -= element.margin.right;
+        }
+
+        // The content area is the element's own font's ascent and
+        // descent; taken from its first text run on the line, scaled if
+        // that run is a descendant's of another size.
+        let font_size = element.style.font_size;
+        let run = self
+            .runs
+            .iter()
+            .find(|(text, ..)| text.start < range.end && range.start < text.end)
+            .or(self.runs.first());
+        let (ascent, descent) = match run {
+            Some(&(_, ascent, descent, size)) if size > 0.0 => {
+                (ascent * font_size / size, descent * font_size / size)
+            }
+            _ => (font_size * 0.8, font_size * 0.2),
+        };
+        let top = baseline - ascent - element.padding.top - element.border.top;
+        let bottom = baseline + descent + element.padding.bottom + element.border.bottom;
+        let mut paint = paint;
+        if !first {
+            paint = paint.without_border(Side::Left);
+        }
+        if !last {
+            paint = paint.without_border(Side::Right);
+        }
+        paint.fills(Rect::new(left, top, right - left, bottom - top), out);
+    }
 }
 
 /// parley's equivalent of a `vertical-align` value.

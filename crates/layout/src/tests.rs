@@ -1339,3 +1339,212 @@ fn the_widest_border_wins_a_shared_edge() {
     let bottom = horizontal.iter().filter(|r| r.origin.y > top + 1.0).count();
     assert_eq!(bottom, 2, "{blue:?}");
 }
+
+/// The left and right edges of `word` on a page, from its glyphs: words
+/// in one style share a run with their neighbors.
+fn word_edges(page: &Page, word: &str) -> (f32, f32) {
+    let run = run_with(page, word);
+    let covered = run.covered_text();
+    let offset = covered.as_ptr() as usize - run.text.as_ptr() as usize;
+    let start = offset + covered.find(word).expect("word in run");
+    let end = start + word.len();
+    let mut x = run.origin.x;
+    let (mut left, mut right) = (f32::MAX, f32::MIN);
+    for glyph in &run.glyphs {
+        if glyph.text_range.start >= start && glyph.text_range.start < end {
+            left = left.min(x);
+            right = right.max(x + glyph.advance);
+        }
+        x += glyph.advance;
+    }
+    (left, right)
+}
+
+fn fills_of(page: &Page, color: Color) -> Vec<Rect> {
+    fills(page)
+        .into_iter()
+        .filter(|fill| fill.color == color)
+        .map(|fill| fill.rect)
+        .collect()
+}
+
+#[test]
+fn inline_backgrounds_cover_their_text_and_paint_first() {
+    let pages =
+        layout("<body style='margin:0'><p>Paid: <span style='background:red'>done</span> now");
+    let page = &pages[0];
+    let backgrounds = fills_of(page, RED);
+    assert_eq!(backgrounds.len(), 1, "{backgrounds:?}");
+    let background = backgrounds[0];
+    let (left, right) = word_edges(page, "done");
+    assert!(approx(background.origin.x, left), "{background:?} {left}");
+    assert!(approx(background.origin.x + background.size.width, right));
+    // The font's ascent and descent around the baseline.
+    let baseline = run_with(page, "done").origin.y;
+    assert!(background.origin.y < baseline - 8.0, "{background:?}");
+    assert!(background.origin.y + background.size.height > baseline + 2.0);
+    assert!(
+        background.size.height < 18.0,
+        "not the line height: {background:?}"
+    );
+    let fill = paint_index(page, |item| matches!(item, Item::Fill(_)));
+    let text = paint_index(page, |item| matches!(item, Item::Text(_)));
+    assert!(fill < text, "background painted first");
+}
+
+#[test]
+fn inline_padding_borders_and_margins_take_space_in_the_line() {
+    let plain = layout("<body style='margin:0'><p>Paid: <span>done</span> now");
+    let boxed = layout(
+        "<body style='margin:0'><p>Paid: <span style='padding:3pt 10pt; margin:0 5pt;
+         border:2pt solid blue'>done</span> now",
+    );
+    let shift = |word: &str| word_edges(&boxed[0], word).0 - word_edges(&plain[0], word).0;
+    assert!(approx(shift("done"), 17.0), "{}", shift("done"));
+    assert!(approx(shift("now"), 34.0), "{}", shift("now"));
+
+    let (left, right) = word_edges(&boxed[0], "done");
+    let blue = Color::rgb(0, 0, 255);
+    let borders = fills_of(&boxed[0], blue);
+    assert_eq!(borders.len(), 4, "{borders:?}");
+    let outer_left = borders.iter().map(|r| r.origin.x).fold(f32::MAX, f32::min);
+    let outer_right = borders
+        .iter()
+        .map(|r| r.origin.x + r.size.width)
+        .fold(f32::MIN, f32::max);
+    assert!(approx(outer_left, left - 12.0), "{outer_left} {left}");
+    assert!(approx(outer_right, right + 12.0), "{outer_right} {right}");
+    // Vertical padding and borders reach above and below the text.
+    let top = borders.iter().map(|r| r.origin.y).fold(f32::MAX, f32::min);
+    let unpadded =
+        layout("<body style='margin:0'><p>Paid: <span style='background:red'>done</span>");
+    let content_top = fills_of(&unpadded[0], RED)[0].origin.y;
+    assert!(approx(top, content_top - 5.0), "{top} {content_top}");
+}
+
+#[test]
+fn vertical_padding_does_not_change_line_height() {
+    let html = |padding: &str| {
+        format!(
+            "<body style='margin:0'><p style='width:80pt'>Paid <span
+             style='padding:{padding}; background:red'>done</span> and some more words after</p>"
+        )
+    };
+    let plain = layout(&html("0"));
+    let padded = layout(&html("10pt 0"));
+    assert_eq!(
+        run_with(&plain[0], "after").origin.y,
+        run_with(&padded[0], "after").origin.y
+    );
+}
+
+#[test]
+fn wrapped_inline_boxes_get_their_side_edges_on_the_first_and_last_lines() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:70pt'>Note: <span style='background:red;
+         border-left:2pt solid blue; border-right:3pt solid blue; padding:0 4pt'>aaaa bbbb
+         cccc dddd</span> end",
+    );
+    let page = &pages[0];
+    let backgrounds = fills_of(page, RED);
+    assert!(backgrounds.len() >= 3, "one per line: {backgrounds:?}");
+    let blue = fills_of(page, Color::rgb(0, 0, 255));
+    let widths: Vec<f32> = blue.iter().map(|r| r.size.width).collect();
+    assert_eq!(blue.len(), 2, "{blue:?}");
+    assert!(
+        approx(widths[0], 2.0) && approx(widths[1], 3.0),
+        "{widths:?}"
+    );
+    // The left edge is on the first line, beside the first word, and the
+    // right one on the last line, beside the last.
+    let (aaaa, _) = word_edges(page, "aaaa");
+    let (_, dddd) = word_edges(page, "dddd");
+    assert!(
+        approx(blue[0].origin.x + 2.0 + 4.0, aaaa),
+        "{blue:?} {aaaa}"
+    );
+    assert!(approx(blue[1].origin.x - 4.0, dddd), "{blue:?} {dddd}");
+    assert!(blue[0].origin.y < blue[1].origin.y);
+    // Lines that the box continues on start at the text, with no padding;
+    // lines it continues from end with it, without the space.
+    let (bbbb, _) = word_edges(page, "bbbb");
+    let middle: Vec<&Rect> = backgrounds
+        .iter()
+        .filter(|r| r.origin.y > blue[0].origin.y + 1.0 && r.origin.y < blue[1].origin.y - 1.0)
+        .collect();
+    for line in middle {
+        assert!(line.origin.x <= bbbb + 0.05, "{line:?}");
+    }
+}
+
+#[test]
+fn inline_padding_stays_with_its_text_at_a_line_break() {
+    // At each width the span may start a line or end one; its padding
+    // never sits alone at the end of a line.
+    for width in (40..120).step_by(3) {
+        let html = format!(
+            "<body style='margin:0'><div style='width:{width}pt'>Total due <span
+             style='background:red; padding:0 8pt'>12500</span> paid</div>"
+        );
+        let pages = layout(&html);
+        let page = &pages[0];
+        let (left, right) = word_edges(page, "12500");
+        let backgrounds = fills_of(page, RED);
+        assert_eq!(backgrounds.len(), 1, "width {width}: {backgrounds:?}");
+        let background = backgrounds[0];
+        assert!(approx(background.origin.x + 8.0, left), "width {width}");
+        assert!(approx(
+            background.origin.x + background.size.width - 8.0,
+            right
+        ));
+    }
+}
+
+#[test]
+fn nested_inline_boxes_paint_outside_in() {
+    let blue = Color::rgb(0, 0, 255);
+    let pages = layout(
+        "<body style='margin:0'><p><span style='background:red; padding:0 6pt'>outer
+         <span style='background:blue; padding:0 3pt'>inner</span> text</span>",
+    );
+    let page = &pages[0];
+    let order: Vec<Color> = fills(page).iter().map(|f| f.color).collect();
+    assert_eq!(order, vec![RED, blue]);
+    let red = fills_of(page, RED)[0];
+    let inner = fills_of(page, blue)[0];
+    assert!(red.origin.x < inner.origin.x);
+    assert!(inner.origin.x + inner.size.width < red.origin.x + red.size.width);
+    let (left, _) = word_edges(page, "inner");
+    assert!(approx(inner.origin.x + 3.0, left));
+}
+
+#[test]
+fn spaces_collapse_across_inline_edges() {
+    let pages = layout(
+        "<body style='margin:0'><p>a <span style='padding:0 5pt'> b </span> c
+         <span style='padding:0 5pt'></span> d",
+    );
+    let page = &pages[0];
+    for run in runs(page) {
+        assert!(!run.text.contains("  "), "{:?}", run.text);
+    }
+    assert_eq!(words(page).join(" ").split_whitespace().count(), 4);
+}
+
+#[test]
+fn inline_padding_counts_when_sizing_a_cell() {
+    let pages = layout(
+        "<body style='margin:0'><table style='border-collapse:collapse'><tr>
+         <td style='border:1pt solid blue'><span style='background:red; padding:0 20pt'>x</span>",
+    );
+    let page = &pages[0];
+    let background = fills_of(page, RED)[0];
+    let (left, right) = word_edges(page, "x");
+    assert!(approx(background.size.width, right - left + 40.0));
+    let blue = fills_of(page, Color::rgb(0, 0, 255));
+    let cell_right = blue
+        .iter()
+        .map(|r| r.origin.x + r.size.width)
+        .fold(f32::MIN, f32::max);
+    assert!(background.origin.x + background.size.width <= cell_right);
+}
