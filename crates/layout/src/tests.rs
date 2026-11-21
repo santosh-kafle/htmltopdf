@@ -1548,3 +1548,111 @@ fn inline_padding_counts_when_sizing_a_cell() {
         .fold(f32::MIN, f32::max);
     assert!(background.origin.x + background.size.width <= cell_right);
 }
+
+const IB: &str = "display:inline-block";
+
+#[test]
+fn inline_blocks_shrink_to_fit_and_sit_on_their_last_baseline() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><p>Total <span style='{IB}; border:1pt solid red'>a<br>bb</span>
+         due"
+    ));
+    let page = &pages[0];
+    let borders = fills_of(page, RED);
+    assert_eq!(borders.len(), 4, "{borders:?}");
+    let left = borders.iter().map(|r| r.origin.x).fold(f32::MAX, f32::min);
+    let right = borders
+        .iter()
+        .map(|r| r.origin.x + r.size.width)
+        .fold(f32::MIN, f32::max);
+    let (bb_left, bb_right) = word_edges(page, "bb");
+    // As wide as its widest line.
+    assert!(approx(left + 1.0, bb_left), "{left} {bb_left}");
+    assert!(approx(right - 1.0, bb_right), "{right} {bb_right}");
+    let (_, total) = word_edges(page, "Total");
+    assert!(left > total && left < total + 5.0, "after the space");
+    // Its last line shares the baseline of the text around it.
+    assert!(approx(
+        run_with(page, "bb").origin.y,
+        run_with(page, "due").origin.y
+    ));
+    let first = runs(page)
+        .into_iter()
+        .find(|run| run.covered_text().trim() == "a")
+        .expect("first line");
+    assert!(first.origin.y < run_with(page, "bb").origin.y);
+}
+
+#[test]
+fn inline_blocks_take_their_width_and_lay_out_inside_it() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><p>Sum <span style='{IB}; width:100pt; padding:0 5pt;
+         background:red; text-align:right'>1250</span> only"
+    ));
+    let page = &pages[0];
+    let background = fills_of(page, RED)[0];
+    assert!(approx(background.size.width, 110.0), "{background:?}");
+    let (_, amount) = word_edges(page, "1250");
+    assert!(approx(amount, background.origin.x + 105.0), "{amount}");
+    let (only, _) = word_edges(page, "only");
+    assert!(only > background.origin.x + 110.0);
+}
+
+#[test]
+fn an_empty_inline_block_sits_on_its_bottom_edge() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><p>Signed <span style='{IB}; width:80pt; height:30pt;
+         border-bottom:1pt solid red'></span> date"
+    ));
+    let page = &pages[0];
+    let line = fills_of(page, RED)[0];
+    let baseline = run_with(page, "date").origin.y;
+    assert!(
+        approx(line.origin.y + line.size.height, baseline),
+        "{line:?}"
+    );
+    assert!(approx(line.size.width, 80.0));
+}
+
+#[test]
+fn inline_blocks_move_to_the_next_line_whole() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><div style='width:90pt'>Some words here <span
+         style='{IB}'>stamp text</span>"
+    ));
+    let page = &pages[0];
+    let stamp = run_with(page, "stamp").origin.y;
+    assert_eq!(run_with(page, "text").origin.y, stamp);
+    assert!(stamp > run_with(page, "Some").origin.y);
+}
+
+#[test]
+fn decorations_do_not_reach_into_inline_blocks() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><p style='text-decoration:underline'>Paid <span
+         style='{IB}'>stamp</span>"
+    ));
+    let page = &pages[0];
+    let (left, right) = word_edges(page, "stamp");
+    for line in fills(page) {
+        let end = line.rect.origin.x + line.rect.size.width;
+        assert!(
+            end <= left + 0.05 || line.rect.origin.x >= right,
+            "{line:?}"
+        );
+    }
+    assert!(!fills(page).is_empty(), "Paid is underlined");
+}
+
+#[test]
+fn inline_blocks_fit_a_cell_sized_to_them() {
+    let pages = layout(&format!(
+        "<body style='margin:0'><table><tr><td>x <span style='{IB}; border:2pt solid red;
+         padding:4pt 10pt'>PAID</span></td><td>y</td></tr></table>"
+    ));
+    let page = &pages[0];
+    assert!(approx(
+        run_with(page, "x").origin.y,
+        run_with(page, "PAID").origin.y
+    ));
+}

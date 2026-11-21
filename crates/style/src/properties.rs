@@ -57,7 +57,8 @@ keyword_enum! {
     Display {
         None = "none" | "table-column" | "table-column-group",
         Block = "block" | "flow-root" | "flex" | "grid",
-        Inline = "inline" | "inline-block" | "inline-flex" | "inline-grid",
+        Inline = "inline",
+        InlineBlock = "inline-block" | "inline-flex" | "inline-grid",
         ListItem = "list-item",
         Table = "table" | "inline-table",
         TableRowGroup = "table-row-group",
@@ -72,7 +73,7 @@ keyword_enum! {
 impl Display {
     /// Whether the box takes part in block layout (as opposed to inline).
     pub fn is_block_level(self) -> bool {
-        !matches!(self, Display::Inline | Display::None)
+        !matches!(self, Display::Inline | Display::InlineBlock | Display::None)
     }
 }
 

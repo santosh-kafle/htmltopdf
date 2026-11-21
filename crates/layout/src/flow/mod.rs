@@ -26,6 +26,7 @@
 mod boxes;
 mod fonts;
 mod inline;
+mod inline_block;
 mod replaced;
 mod table;
 mod webfonts;
@@ -316,6 +317,9 @@ pub(crate) struct Flow<'c, 'a> {
     /// An element whose border box to report, and the decoration that
     /// records it once laid out. See [`Flow::track`].
     tracked: Option<(NodeId, Option<usize>)>,
+    /// The baseline of the last line laid out, the baseline of an
+    /// inline-block.
+    baseline: Option<f64>,
 }
 
 /// A box entered with [`Flow::open_box`].
@@ -347,6 +351,7 @@ impl<'c, 'a> Flow<'c, 'a> {
             force_break: false,
             keep_next: false,
             tracked: None,
+            baseline: None,
         }
     }
 
@@ -589,13 +594,18 @@ impl<'c, 'a> Flow<'c, 'a> {
                     match child_style.display {
                         Display::None => {}
                         Display::Inline if element.name == "br" => inline.push_break(&child_style),
-                        Display::Inline if replaced::is_image(doc, child) => {
+                        Display::Inline | Display::InlineBlock
+                            if replaced::is_image(doc, child) =>
+                        {
                             self.inline_image(child, &child_style, width, inline);
                         }
                         Display::Inline => {
                             inline.open_element(child, &child_style, width);
                             self.children(child, &child_style, x, width, inline);
                             inline.close_element(child);
+                        }
+                        Display::InlineBlock => {
+                            self.inline_block(child, &child_style, width, inline);
                         }
                         _ => {
                             self.paragraph(std::mem::take(inline), style, x, width);

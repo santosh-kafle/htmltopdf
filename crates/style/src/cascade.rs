@@ -5,7 +5,7 @@ use presswork_dom::{Document, NodeId};
 use selectors::context::SelectorCaches;
 use selectors::parser::Selector;
 
-use crate::computed::ComputedStyle;
+use crate::computed::{ComputedStyle, TextDecorations};
 use crate::hints::presentational_hints;
 use crate::properties::{Display, LonghandId, PropertyDeclaration};
 use crate::selector::{ElementRef, Simple};
@@ -292,8 +292,13 @@ impl Stylist {
         }
 
         // The root element always generates a block box.
-        if is_root && style.display == Display::Inline {
+        if is_root && matches!(style.display, Display::Inline | Display::InlineBlock) {
             style.display = Display::Block;
+        }
+        // Decorations do not reach into atomic inlines (CSS Text
+        // Decoration 3, section 2.1).
+        if style.display == Display::InlineBlock {
+            style.inherited_decorations = TextDecorations::NONE;
         }
         style
     }

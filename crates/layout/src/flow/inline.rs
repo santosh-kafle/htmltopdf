@@ -108,10 +108,16 @@ pub(super) struct InlineObject {
     pub vertical_align: VerticalAlign,
     /// Content relative to the top-left of the margin box.
     pub items: Vec<Item>,
+    /// Distance from the top of the margin box to the baseline that
+    /// sits on the line's; `None` for the bottom edge.
+    pub baseline: Option<f32>,
     /// The left or right edges of an inline element: no break between
     /// it and the text next to it.
     spacer: bool,
 }
+
+/// How far, in points, a line may exceed its width and still fit.
+const FIT_TOLERANCE: f32 = 0.001;
 
 /// The start or end of an inline element not yet placed.
 const OPEN: usize = usize::MAX;
@@ -137,6 +143,7 @@ impl InlineObject {
             min_width,
             vertical_align,
             items,
+            baseline: None,
             spacer: false,
         }
     }
@@ -476,7 +483,7 @@ impl Context<'_> {
                 index: object.index,
                 width: object.width,
                 height: object.height,
-                baseline: None,
+                baseline: object.baseline,
                 vertical_align: vertical_align(object.vertical_align),
             });
         }
@@ -528,7 +535,10 @@ impl Flow<'_, '_> {
             TextAlign::Justify => Alignment::Justify,
         };
         layout.set_alignment(alignment, AlignmentOptions::default());
-        layout.break_all_lines(Some(width));
+        // Content measured to fit `width` exactly (a table cell sized to
+        // its max-content width) can exceed it by a rounding error, as
+        // parley sums advances in another order when breaking.
+        layout.break_all_lines(Some(width + FIT_TOLERANCE));
 
         let marker = self.marker.take();
         let count = layout.len();
@@ -606,6 +616,7 @@ impl Flow<'_, '_> {
                 metrics.block_max_coord - top,
                 items,
             );
+            self.baseline = Some(self.y + f64::from(metrics.baseline));
             if kept(index) {
                 self.keep_last_slice();
             }
