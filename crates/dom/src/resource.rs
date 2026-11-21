@@ -89,6 +89,11 @@ impl<'a> Fetcher<'a> {
         }
     }
 
+    /// The document's location, if it has one.
+    pub fn base(&self) -> Option<&Url> {
+        self.base.as_ref()
+    }
+
     /// A fetcher that only loads `data:` URLs.
     pub fn data_only() -> Fetcher<'static> {
         Fetcher::new(&DataUrls, None)

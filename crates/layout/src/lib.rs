@@ -35,7 +35,8 @@ pub use presswork_dom::resource::{DataUrls, Fetcher, LoadError, LoadFailure, Loa
 use presswork_style::Stylist;
 
 pub use fragment::{
-    Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Page, TextRun,
+    Color, Fill, FontData, Glyph, Image, ImageData, ImageFormat, Item, Link, LinkTarget, Mark,
+    MarkKind, Page, TextRun,
 };
 pub use geometry::{EdgeSizes, Point, Rect, Size};
 pub use margin::{Band, BandStyle, BandText, MarginDocument};
@@ -121,7 +122,9 @@ impl Engine {
         let margins = options.margins;
         let width = (options.page_size.width - margins.left - margins.right).max(0.0);
 
+        let generated = flow::generated::resolve(doc, styles);
         let mut context = flow::Context {
+            generated: &generated,
             fonts: &mut self.fonts,
             generics: &self.generics,
             texts: &mut self.texts,

@@ -12,13 +12,14 @@ use parley::{
 };
 use presswork_dom::{Document, NodeId};
 use presswork_style::{
-    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, Side, Sides, TextAlign,
-    TextDecorationLine, TextDecorations, TextTransform, VerticalAlign, WhiteSpace,
+    Color, ComputedStyle, FontFamilyName, LineHeight, ListStyleType, Pseudo, Side, Sides,
+    TextAlign, TextDecorationLine, TextDecorations, TextTransform, VerticalAlign, WhiteSpace,
 };
 use read_fonts::{FontRef, TableProvider};
 
-use super::{BoxPaint, Context, Flow, GenericFonts, WebFonts};
-use crate::fragment::{Fill, FontData, Glyph, Item, TextRun};
+use super::generated::counter_text;
+use super::{BoxPaint, Context, Flow, GenericFonts, WebFonts, mark};
+use crate::fragment::{Fill, FontData, Glyph, Item, Link, LinkTarget, MarkKind, TextRun};
 use crate::geometry::{Point, Rect};
 
 /// How text is painted, as parley's per-span "brush": its color and the
@@ -52,7 +53,7 @@ pub(super) struct Inline {
     nesting: Vec<ComputedStyle>,
     /// The inline elements now open, outermost first, with their index
     /// in `nesting`.
-    open: Vec<(NodeId, usize)>,
+    open: Vec<(ElementKey, usize)>,
     /// The indices in `nesting` of `open`.
     path: Rc<[usize]>,
     /// The paragraph starts its block container, so `text-indent`
@@ -69,7 +70,13 @@ pub(super) struct Inline {
     /// Byte offsets of the U+FFFC characters that are spacers rather
     /// than images, ascending.
     spacers: Vec<usize>,
+    /// Inline elements that links can point to: where they start, and
+    /// their names.
+    anchors: Vec<(usize, Arc<str>)>,
 }
+
+/// An element, or one of its `::before` and `::after` boxes.
+pub(super) type ElementKey = (NodeId, Option<Pseudo>);
 
 /// A stretch of text in one style.
 struct Span {
@@ -89,7 +96,7 @@ struct Span {
 /// padding and borders, which do not affect the line height (CSS 2.1
 /// section 10.8.1).
 struct InlineElement {
-    node: NodeId,
+    node: ElementKey,
     style: ComputedStyle,
     /// The elements it is in, and itself.
     path: Rc<[usize]>,
@@ -98,6 +105,8 @@ struct InlineElement {
     /// element left open by a block inside it extends to the end.
     range: Range<usize>,
     paint: Option<BoxPaint>,
+    /// Where the element links to, if it is a link.
+    link: Option<LinkTarget>,
     /// Only the left and right margins are used; negative ones count as
     /// zero.
     margin: Sides<f32>,
@@ -262,7 +271,13 @@ impl Inline {
     /// [`Self::leave`] ends it. If it paints a box or takes horizontal
     /// space, it is recorded for that; percentages are of
     /// `containing_width`.
-    pub fn enter(&mut self, node: NodeId, style: &ComputedStyle, containing_width: f32) {
+    pub fn enter(
+        &mut self,
+        node: ElementKey,
+        style: &ComputedStyle,
+        containing_width: f32,
+        link: Option<LinkTarget>,
+    ) {
         self.open.push((node, self.nesting.len()));
         self.nesting.push(style.clone());
         self.path = self.open.iter().map(|&(_, index)| index).collect();
@@ -281,19 +296,30 @@ impl Inline {
             path: Rc::clone(&self.path),
             range: OPEN..OPEN,
             paint,
+            link,
             margin,
             border,
             padding,
         };
-        if paint.is_none() && element.start_width() <= 0.0 && element.end_width() <= 0.0 {
+        if paint.is_none()
+            && element.link.is_none()
+            && element.start_width() <= 0.0
+            && element.end_width() <= 0.0
+        {
             return;
         }
         self.pending.push(self.elements.len());
         self.elements.push(element);
     }
 
+    /// Records that the inline element starting here can be linked to as
+    /// `name`.
+    pub fn anchor(&mut self, name: Arc<str>) {
+        self.anchors.push((self.text.len(), name));
+    }
+
     /// Leaves the inline element `node`.
-    pub fn leave(&mut self, node: NodeId) {
+    pub fn leave(&mut self, node: ElementKey) {
         self.close_element(node);
         if self.open.last().is_some_and(|&(open, _)| open == node) {
             self.open.pop();
@@ -317,7 +343,7 @@ impl Inline {
     /// Ends the painted inline element `node`, if it was started in this
     /// paragraph: a block inside the element splits the paragraph, and
     /// the part after the block is not painted.
-    fn close_element(&mut self, node: NodeId) {
+    fn close_element(&mut self, node: ElementKey) {
         let Some(index) = self.elements.iter().rposition(|e| e.node == node) else {
             return;
         };
@@ -656,6 +682,7 @@ impl Flow<'_, '_> {
         let text: Arc<str> = inline.text.into();
         let boxes = inline.boxes;
         let elements = inline.elements;
+        let anchors = inline.anchors;
         let mut layout = self
             .cx
             .shape(&text, style, &inline.spans, &inline.nesting, &boxes);
@@ -758,11 +785,26 @@ impl Flow<'_, '_> {
             }
             if !elements.is_empty() {
                 let baseline = metrics.baseline - top;
+                let height = metrics.block_max_coord - top;
                 let mut boxes = Vec::new();
                 for element in &elements {
-                    pieces.paint(element, &text, baseline, &mut boxes);
+                    pieces.paint(element, &text, baseline, height, &mut boxes);
                 }
                 items.splice(0..0, boxes);
+            }
+            let line_text = line.text_range();
+            for (position, name) in &anchors {
+                let at_start = index == 0 && *position <= line_text.start;
+                if at_start || line_text.contains(position) {
+                    items.push(mark(x, MarkKind::Anchor(Arc::clone(name))));
+                }
+            }
+            if let Some(target) = &self.link {
+                // Inside a block-level link: the whole line is clickable.
+                items.push(Item::Link(Link {
+                    rect: Rect::new(x, 0.0, width, metrics.block_max_coord - top),
+                    target: target.clone(),
+                }));
             }
             if index == 0
                 && let Some(marker) = &marker
@@ -982,12 +1024,16 @@ impl LinePieces {
     }
 
     /// Appends the background and borders of `element`'s box on this
-    /// line, if any of it is here. `baseline` is relative to the line's
-    /// top.
-    fn paint(&self, element: &InlineElement, text: &str, baseline: f32, out: &mut Vec<Item>) {
-        let Some(paint) = element.paint else {
-            return;
-        };
+    /// line, and its link area, if any of it is here. `baseline` is
+    /// relative to the line's top, which is `line_height` tall.
+    fn paint(
+        &self,
+        element: &InlineElement,
+        text: &str,
+        baseline: f32,
+        line_height: f32,
+        out: &mut Vec<Item>,
+    ) {
         let range = element.range.start..element.range.end.min(text.len());
         let Some(last) = text.get(range.clone()).and_then(|t| t.chars().next_back()) else {
             return;
@@ -1027,6 +1073,17 @@ impl LinePieces {
         if last {
             right -= element.margin.right;
         }
+        if let Some(target) = &element.link {
+            // The whole height of the line is clickable, so that images
+            // and taller text inside count too.
+            out.push(Item::Link(Link {
+                rect: Rect::new(left, 0.0, right - left, line_height),
+                target: target.clone(),
+            }));
+        }
+        let Some(paint) = element.paint else {
+            return;
+        };
 
         // The content area is the element's own font's ascent and
         // descent around its baseline; taken from its first text run on
@@ -1090,61 +1147,11 @@ pub(super) fn list_marker(doc: &Document, item: NodeId, style: &ComputedStyle) -
     };
     Some(match style.list_style_type {
         ListStyleType::None => return None,
-        ListStyleType::Disc => "•".into(),
-        ListStyleType::Circle => "◦".into(),
-        ListStyleType::Square => "▪".into(),
-        ListStyleType::Decimal => format!("{}.", ordinal()),
-        ListStyleType::LowerAlpha => format!("{}.", alphabetic(ordinal(), false)),
-        ListStyleType::UpperAlpha => format!("{}.", alphabetic(ordinal(), true)),
-        ListStyleType::LowerRoman => format!("{}.", roman(ordinal(), false)),
-        ListStyleType::UpperRoman => format!("{}.", roman(ordinal(), true)),
-    })
-}
-
-/// `1` → `a`, `26` → `z`, `27` → `aa`. Falls back to decimal below 1.
-fn alphabetic(mut n: i64, upper: bool) -> String {
-    if n < 1 {
-        return n.to_string();
-    }
-    let base = if upper { b'A' } else { b'a' };
-    let mut letters = Vec::new();
-    while n > 0 {
-        n -= 1;
-        letters.push(base + (n % 26) as u8);
-        n /= 26;
-    }
-    letters.reverse();
-    String::from_utf8(letters).expect("ASCII letters")
-}
-
-/// Roman numerals for 1 to 3999; decimal outside that range.
-fn roman(mut n: i64, upper: bool) -> String {
-    if !(1..=3999).contains(&n) {
-        return n.to_string();
-    }
-    const NUMERALS: [(i64, &str); 13] = [
-        (1000, "m"),
-        (900, "cm"),
-        (500, "d"),
-        (400, "cd"),
-        (100, "c"),
-        (90, "xc"),
-        (50, "l"),
-        (40, "xl"),
-        (10, "x"),
-        (9, "ix"),
-        (5, "v"),
-        (4, "iv"),
-        (1, "i"),
-    ];
-    let mut out = String::new();
-    for (value, numeral) in NUMERALS {
-        while n >= value {
-            out.push_str(numeral);
-            n -= value;
+        bullet @ (ListStyleType::Disc | ListStyleType::Circle | ListStyleType::Square) => {
+            counter_text(0, bullet)
         }
-    }
-    if upper { out.to_uppercase() } else { out }
+        numbered => format!("{}.", counter_text(ordinal(), numbered)),
+    })
 }
 
 /// Tracks how many clusters of a shaped run earlier glyph runs on the same
@@ -1352,14 +1359,5 @@ mod tests {
         for span in &inline.spans {
             assert!(span.range.end <= inline.text.len() && span.range.start <= span.range.end);
         }
-    }
-
-    #[test]
-    fn list_counters() {
-        assert_eq!(alphabetic(1, false), "a");
-        assert_eq!(alphabetic(27, true), "AA");
-        assert_eq!(roman(1994, true), "MCMXCIV");
-        assert_eq!(roman(4, false), "iv");
-        assert_eq!(roman(0, false), "0");
     }
 }

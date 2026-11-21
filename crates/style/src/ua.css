@@ -43,6 +43,8 @@ pre, listing, xmp, plaintext { white-space: pre; }
 small { font-size: smaller; }
 big { font-size: larger; }
 sub, sup { font-size: smaller; }
+q::before { content: open-quote; }
+q::after { content: close-quote; }
 sub { vertical-align: sub; }
 sup { vertical-align: super; }
 a:link { color: #0000ee; text-decoration: underline; }

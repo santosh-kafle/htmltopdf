@@ -8,26 +8,51 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use krilla::action::{Action, LinkAction};
+use krilla::annotation::{Annotation, LinkAnnotation, Target};
 use krilla::color::rgb;
+use krilla::destination::{Destination, XyzDestination};
 use krilla::error::KrillaError;
 use krilla::geom::{PathBuilder, Point, Rect, Size, Transform};
 use krilla::image::Image as PdfImage;
 use krilla::metadata::Metadata;
 use krilla::num::NormalizedF32;
+use krilla::outline::{Outline, OutlineNode};
 use krilla::page::PageSettings;
 use krilla::paint::Fill;
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::{Data, Document};
-use presswork_layout::{Color, FontData, Image, ImageData, ImageFormat, Item, Page, TextRun};
+use presswork_layout::{
+    Color, FontData, Image, ImageData, ImageFormat, Item, Link, LinkTarget, MarkKind, Page, TextRun,
+};
 
 /// Document-level options for the generated PDF.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PdfOptions {
     /// `Title` entry in the PDF metadata.
     pub title: Option<String>,
     /// `Author` entry in the PDF metadata.
     pub author: Option<String>,
+    /// How many heading levels the outline (bookmarks) shows; zero for
+    /// none. wkhtmltopdf's default is 4.
+    pub outline_depth: usize,
+    /// Whether links to other documents are clickable.
+    pub external_links: bool,
+    /// Whether links within the document are clickable.
+    pub internal_links: bool,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        Self {
+            title: None,
+            author: None,
+            outline_depth: 4,
+            external_links: true,
+            internal_links: true,
+        }
+    }
 }
 
 /// Writing the PDF failed.
@@ -48,6 +73,87 @@ pub struct Pdf {
     pub bytes: Vec<u8>,
     /// Images left out because they could not be decoded, by source.
     pub broken_images: Vec<String>,
+}
+
+/// Where each anchor is: page index and position. The first element with
+/// a name wins, as in browsers.
+fn anchors(pages: &[Page]) -> HashMap<&str, (usize, Point)> {
+    let mut anchors = HashMap::new();
+    for (index, page) in pages.iter().enumerate() {
+        for item in &page.items {
+            if let Item::Mark(mark) = item
+                && let MarkKind::Anchor(name) = &mark.kind
+            {
+                anchors
+                    .entry(name.as_ref())
+                    .or_insert((index, Point::from_xy(mark.origin.x, mark.origin.y)));
+            }
+        }
+    }
+    anchors
+}
+
+/// The annotation that makes `link` clickable, if its target exists and
+/// links of its kind are enabled.
+fn link_annotation(
+    link: &Link,
+    anchors: &HashMap<&str, (usize, Point)>,
+    options: &PdfOptions,
+) -> Option<Annotation> {
+    let r = link.rect;
+    let rect = Rect::from_xywh(r.origin.x, r.origin.y, r.size.width, r.size.height)?;
+    let target = match &link.target {
+        LinkTarget::Url(url) if options.external_links => {
+            Target::Action(Action::Link(LinkAction::new(url.to_string())))
+        }
+        LinkTarget::Anchor(name) if options.internal_links => {
+            let &(page, point) = anchors.get(name.as_ref())?;
+            Target::Destination(Destination::Xyz(XyzDestination::new(page, point)))
+        }
+        _ => return None,
+    };
+    Some(Annotation::new_link(
+        LinkAnnotation::new(rect, target),
+        None,
+    ))
+}
+
+/// The outline (bookmarks) from the headings of `pages`, nested by level
+/// and `depth` deep at most; `None` if there are no headings.
+fn outline(pages: &[Page], depth: usize) -> Option<Outline> {
+    let mut outline = Outline::new();
+    let mut any = false;
+    // The open headings, outermost first, with their levels.
+    let mut open: Vec<(u8, OutlineNode)> = Vec::new();
+    let close = |open: &mut Vec<(u8, OutlineNode)>, outline: &mut Outline| {
+        let (_, node) = open.pop().expect("an open heading");
+        match open.last_mut() {
+            Some((_, parent)) => parent.push_child(node),
+            None => outline.push_child(node),
+        }
+    };
+    for (index, page) in pages.iter().enumerate() {
+        for item in &page.items {
+            let Item::Mark(mark) = item else { continue };
+            let MarkKind::Heading { level, title } = &mark.kind else {
+                continue;
+            };
+            while open.last().is_some_and(|(open, _)| open >= level) {
+                close(&mut open, &mut outline);
+            }
+            if open.len() >= depth {
+                continue;
+            }
+            let point = Point::from_xy(mark.origin.x, mark.origin.y);
+            let node = OutlineNode::new(title.to_string(), XyzDestination::new(index, point));
+            open.push((*level, node));
+            any = true;
+        }
+    }
+    while !open.is_empty() {
+        close(&mut open, &mut outline);
+    }
+    any.then_some(outline)
 }
 
 /// Renders laid-out pages to a PDF.
@@ -87,6 +193,7 @@ fn write(
 ) -> Result<Vec<u8>, KrillaError> {
     let mut document = Document::new();
     let mut fonts = FontCache::default();
+    let anchors = anchors(pages);
 
     for page in pages {
         let Some(settings) = PageSettings::from_wh(page.size.width, page.size.height) else {
@@ -94,6 +201,7 @@ fn write(
         };
         let mut pdf_page = document.start_page_with(settings);
         let mut surface = pdf_page.surface();
+        let mut links = Vec::new();
         for item in &page.items {
             match item {
                 Item::Text(run) => {
@@ -123,10 +231,22 @@ fn write(
                         surface.draw_path(&path);
                     }
                 }
+                Item::Link(link) => links.push(link),
+                Item::Mark(_) => {}
             }
         }
         surface.finish();
+        for link in links {
+            if let Some(annotation) = link_annotation(link, &anchors, options) {
+                pdf_page.add_annotation(annotation);
+            }
+        }
         pdf_page.finish();
+    }
+    if options.outline_depth > 0
+        && let Some(outline) = outline(pages, options.outline_depth)
+    {
+        document.set_outline(outline);
     }
 
     let mut metadata = Metadata::new().creator(format!("presswork {}", env!("CARGO_PKG_VERSION")));
@@ -297,12 +417,56 @@ mod tests {
             &pages,
             &PdfOptions {
                 title: Some("Test".into()),
-                author: None,
+                ..PdfOptions::default()
             },
         )
         .unwrap();
         assert!(pdf.bytes.starts_with(b"%PDF-"));
         assert!(contains(&pdf.bytes, b"Font"), "font is embedded");
+    }
+
+    fn count(pdf: &[u8], needle: &[u8]) -> usize {
+        pdf.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    #[test]
+    fn links_and_the_outline() {
+        let pages = pages(
+            "<h1>Invoice</h1><p><a href='#terms'>Terms</a> <a href='#missing'>x</a>
+             <a href='https://example.com/pay'>Pay</a></p><h2 id=terms>Terms</h2>",
+        );
+        let pdf = render_pdf(&pages, &PdfOptions::default()).unwrap().bytes;
+        // The link to a missing anchor is left out.
+        assert_eq!(count(&pdf, b"/Subtype/Link"), 2);
+        assert!(contains(&pdf, b"/URI(https://example.com/pay)"));
+        assert!(contains(&pdf, b"/Outlines"));
+
+        let options = PdfOptions {
+            outline_depth: 0,
+            external_links: false,
+            internal_links: false,
+            ..PdfOptions::default()
+        };
+        let pdf = render_pdf(&pages, &options).unwrap().bytes;
+        assert_eq!(count(&pdf, b"/Subtype/Link"), 0);
+        assert!(!contains(&pdf, b"/Outlines"));
+    }
+
+    #[test]
+    fn the_outline_nests_headings_and_stops_at_its_depth() {
+        let pages = pages("<h1>A</h1><h3>A.1</h3><h2>A.2</h2><h3>A.2.1</h3><h1>B</h1>");
+        let titles = |depth| {
+            let options = PdfOptions {
+                outline_depth: depth,
+                ..PdfOptions::default()
+            };
+            let pdf = render_pdf(&pages, &options).unwrap().bytes;
+            count(&pdf, b"/Title(")
+        };
+        // Each outline entry has a title.
+        assert_eq!(titles(4), 5);
+        assert_eq!(titles(2), 4, "A.2.1 is at depth 3");
+        assert_eq!(titles(1), 2);
     }
 
     #[test]

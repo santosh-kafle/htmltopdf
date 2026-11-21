@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use crate::properties::{
-    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, CssWide,
-    Display, FontFamilyName, FontSize, FontWeight, GenericFamily, LineHeight, ListStyleType,
-    LonghandId, PropertyDeclaration, TableLayout, TextAlign, TextDecorationLine, TextTransform,
-    VerticalAlign, WhiteSpace,
+    BORDER_WIDTH_MEDIUM, BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Content,
+    CounterChanges, CssWide, Display, FontFamilyName, FontSize, FontWeight, GenericFamily,
+    LineHeight, ListStyleType, LonghandId, PropertyDeclaration, TableLayout, TextAlign,
+    TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
 };
 use crate::values::{Color, ColorValue, Dimension, Length, Side, Sides};
 
@@ -147,6 +147,11 @@ pub struct ComputedStyle {
     pub letter_spacing: f32,
     /// Extra space after each word, in points.
     pub word_spacing: f32,
+    /// `content`, for `::before` and `::after`.
+    pub content: Content,
+    pub counter_reset: CounterChanges,
+    pub counter_increment: CounterChanges,
+    pub counter_set: CounterChanges,
     /// The text decorations of the ancestors, which apply to this
     /// element's text as well as its own. Not a CSS property.
     pub inherited_decorations: TextDecorations,
@@ -200,6 +205,10 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            content: Content::Normal,
+            counter_reset: Arc::from([]),
+            counter_increment: Arc::from([]),
+            counter_set: Arc::from([]),
             inherited_decorations: TextDecorations::NONE,
             lang: None,
             root_font_size: DEFAULT_FONT_SIZE,
@@ -224,6 +233,10 @@ impl ComputedStyle {
         use LonghandId as L;
         match id {
             L::Display => self.display = other.display,
+            L::Content => self.content = other.content.clone(),
+            L::CounterReset => self.counter_reset = Arc::clone(&other.counter_reset),
+            L::CounterIncrement => self.counter_increment = Arc::clone(&other.counter_increment),
+            L::CounterSet => self.counter_set = Arc::clone(&other.counter_set),
             L::Color => self.color = other.color,
             L::BackgroundColor => self.background_color = other.background_color,
             L::FontFamily => self.font_family = Arc::clone(&other.font_family),
@@ -283,6 +296,10 @@ impl ComputedStyle {
         let pt = |length: Length| length.to_pt(font_size, root);
         match declaration {
             D::Display(v) => self.display = *v,
+            D::Content(v) => self.content = v.clone(),
+            D::CounterReset(v) => self.counter_reset = Arc::clone(v),
+            D::CounterIncrement(v) => self.counter_increment = Arc::clone(v),
+            D::CounterSet(v) => self.counter_set = Arc::clone(v),
             D::Color(v) => self.color = v.resolve(parent.color),
             D::BackgroundColor(v) => self.background_color = v.resolve(self.color),
             D::FontFamily(v) => self.font_family = Arc::clone(v),

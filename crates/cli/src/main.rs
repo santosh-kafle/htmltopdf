@@ -44,6 +44,9 @@ struct Cli {
     #[arg(long)]
     title: Option<String>,
 
+    #[command(flatten)]
+    pdf: PdfArgs,
+
     /// A stylesheet (path or file: URL) applied to the document as a user
     /// stylesheet: the document's own styles win unless it says !important
     #[arg(long, value_name = "PATH")]
@@ -63,6 +66,55 @@ struct Cli {
         value_parser = BoolishValueParser::new()
     )]
     strict: bool,
+}
+
+/// Outline and link options.
+#[derive(Debug, clap::Args)]
+struct PdfArgs {
+    /// Put an outline (bookmarks) of the document's headings in the PDF
+    /// (default)
+    #[arg(long, overrides_with = "no_outline")]
+    outline: bool,
+
+    /// Do not put an outline in the PDF
+    #[arg(long, overrides_with = "outline")]
+    no_outline: bool,
+
+    /// How many heading levels the outline shows
+    #[arg(long, value_name = "LEVEL", default_value_t = 4)]
+    outline_depth: usize,
+
+    /// Make links to other documents clickable (default)
+    #[arg(long, overrides_with = "disable_external_links")]
+    enable_external_links: bool,
+
+    /// Do not make links to other documents clickable
+    #[arg(long, overrides_with = "enable_external_links")]
+    disable_external_links: bool,
+
+    /// Make links within the document clickable (default)
+    #[arg(long, overrides_with = "disable_internal_links")]
+    enable_internal_links: bool,
+
+    /// Do not make links within the document clickable
+    #[arg(long, overrides_with = "enable_internal_links")]
+    disable_internal_links: bool,
+}
+
+impl PdfArgs {
+    fn options(&self, title: Option<String>) -> PdfOptions {
+        PdfOptions {
+            title,
+            author: None,
+            outline_depth: if self.no_outline {
+                0
+            } else {
+                self.outline_depth
+            },
+            external_links: !self.disable_external_links,
+            internal_links: !self.disable_internal_links,
+        }
+    }
 }
 
 /// The wkhtmltopdf release whose command line presswork accepts.
@@ -287,13 +339,11 @@ fn render(html: &[u8], cli: &Cli, base: Url) -> Result<Vec<u8>> {
         title: doc.title().unwrap_or_default(),
         doctitle: title.clone().unwrap_or_default(),
         now: chrono::Local::now().naive_local(),
+        sections: headers::sections(&pages),
     };
     cli.headers
         .draw(&mut engine, &mut pages, layout.margins, &info, &html_bands);
-    let options = PdfOptions {
-        title,
-        author: None,
-    };
+    let options = cli.pdf.options(title);
     let pdf = presswork_paint::render_pdf(&pages, &options)?;
 
     failures.extend(fetcher.failures());
@@ -452,19 +502,39 @@ mod tests {
     }
 
     #[test]
+    fn outline_and_link_options_reach_the_pdf() {
+        let options = |args: &[&str]| {
+            let mut all = args.to_vec();
+            all.extend(["a", "b"]);
+            let (cli, n) = parse(&all).unwrap();
+            assert_eq!(cli.check_ignored(&n).unwrap(), Vec::<String>::new());
+            cli.pdf.options(None)
+        };
+        let default = options(&[]);
+        assert_eq!(default.outline_depth, 4);
+        assert!(default.external_links && default.internal_links);
+        assert_eq!(options(&["--outline-depth", "2"]).outline_depth, 2);
+        assert_eq!(options(&["--no-outline"]).outline_depth, 0);
+        assert_eq!(options(&["--no-outline", "--outline"]).outline_depth, 4);
+        let links = options(&["--disable-external-links", "--disable-internal-links"]);
+        assert!(!links.external_links && !links.internal_links);
+        assert!(options(&["--disable-external-links", "--enable-external-links"]).external_links);
+    }
+
+    #[test]
     fn quiet_silences_only_harmless_warnings() {
-        let (cli, n) = parse(&["-q", "--outline", "--zoom", "2", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["-q", "--disable-forms", "--zoom", "2", "a", "b"]).unwrap();
         let warnings = cli.check_ignored(&n).unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("--zoom") && !warnings[0].contains("--outline"));
+        assert!(warnings[0].contains("--zoom") && !warnings[0].contains("--disable-forms"));
 
-        let (cli, n) = parse(&["--outline", "--zoom", "2", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["--disable-forms", "--zoom", "2", "a", "b"]).unwrap();
         assert_eq!(cli.check_ignored(&n).unwrap().len(), 2);
     }
 
     #[test]
     fn strict_fails_on_options_that_change_the_output() {
-        let (cli, n) = parse(&["--strict", "--outline", "a", "b"]).unwrap();
+        let (cli, n) = parse(&["--strict", "--disable-forms", "a", "b"]).unwrap();
         assert!(cli.check_ignored(&n).is_ok());
 
         let (cli, n) = parse(&["--strict", "--viewport-size", "800x600", "a", "b"]).unwrap();

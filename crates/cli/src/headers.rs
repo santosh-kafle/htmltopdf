@@ -20,8 +20,8 @@ use clap::{ArgAction, Args};
 use presswork_dom::Document;
 use presswork_dom::resource::display_url;
 use presswork_layout::{
-    Band, BandStyle, BandText, EdgeSizes, Engine, Fetcher, LayoutOptions, LoadError, LoadFailure,
-    Loader, MarginDocument, Page,
+    Band, BandStyle, BandText, EdgeSizes, Engine, Fetcher, Item, LayoutOptions, LoadError,
+    LoadFailure, Loader, MarginDocument, MarkKind, Page,
 };
 use presswork_style::{Side, Stylist};
 use url::Url;
@@ -177,6 +177,35 @@ pub(crate) struct DocumentInfo {
     pub doctitle: String,
     /// When the conversion runs, in local time.
     pub now: NaiveDateTime,
+    /// `[section]`, `[subsection]` and `[subsubsection]` of each page.
+    pub sections: Vec<[String; 3]>,
+}
+
+/// The section, subsection and subsubsection of each page: the titles of
+/// the last heading on the page or before it, and of the last headings
+/// under it, by outline nesting. Like wkhtmltopdf, which takes them from
+/// its outline.
+pub(crate) fn sections(pages: &[Page]) -> Vec<[String; 3]> {
+    let mut open: Vec<(u8, &str)> = Vec::new();
+    pages
+        .iter()
+        .map(|page| {
+            for item in &page.items {
+                if let Item::Mark(mark) = item
+                    && let MarkKind::Heading { level, title } = &mark.kind
+                {
+                    while open.last().is_some_and(|(open, _)| open >= level) {
+                        open.pop();
+                    }
+                    open.push((*level, title));
+                }
+            }
+            std::array::from_fn(|depth| {
+                open.get(depth)
+                    .map_or_else(String::new, |(_, title)| (*title).to_owned())
+            })
+        })
+        .collect()
 }
 
 /// The texts of one band, before variables are replaced.
@@ -416,6 +445,11 @@ impl HeaderArgs {
             .collect();
         let offset = self.page_offset;
         let number = |n: usize| (offset + n as i64).to_string();
+        let section = |depth: usize| {
+            info.sections
+                .get(page - 1)
+                .map_or_else(String::new, |sections| sections[depth].clone())
+        };
         // Like wkhtmltopdf, the built-in variables win over --replace.
         let builtins = [
             ("page", number(page)),
@@ -431,11 +465,9 @@ impl HeaderArgs {
             ("date", info.now.format("%-d %b %Y").to_string()),
             ("isodate", info.now.format("%Y-%m-%d").to_string()),
             ("time", info.now.format("%H:%M:%S").to_string()),
-            // Headings are not tracked yet, so these are always empty, as
-            // in a wkhtmltopdf document without headings.
-            ("section", String::new()),
-            ("subsection", String::new()),
-            ("subsubsection", String::new()),
+            ("section", section(0)),
+            ("subsection", section(1)),
+            ("subsubsection", section(2)),
         ];
         vars.extend(builtins.map(|(name, value)| (name.to_owned(), value)));
         vars
@@ -530,6 +562,47 @@ mod tests {
         headers: HeaderArgs,
     }
 
+    #[test]
+    fn sections_follow_the_headings_page_by_page() {
+        use presswork_layout::{Mark, Point, Size};
+        let heading = |level, title: &str| {
+            Item::Mark(Mark {
+                origin: Point { x: 0.0, y: 0.0 },
+                kind: MarkKind::Heading {
+                    level,
+                    title: title.into(),
+                },
+            })
+        };
+        let page = |items| Page {
+            size: Size {
+                width: 100.0,
+                height: 100.0,
+            },
+            items,
+        };
+        let pages = [
+            page(vec![]),
+            page(vec![heading(1, "Seller"), heading(2, "Address")]),
+            page(vec![heading(3, "Phone")]),
+            page(vec![heading(1, "Terms")]),
+            page(vec![]),
+        ];
+        let names = |s: &[String; 3]| s.clone();
+        let sections: Vec<[String; 3]> = sections(&pages).iter().map(names).collect();
+        let row = |a: &str, b: &str, c: &str| [a.to_owned(), b.to_owned(), c.to_owned()];
+        assert_eq!(
+            sections,
+            [
+                row("", "", ""),
+                row("Seller", "Address", ""),
+                row("Seller", "Address", "Phone"),
+                row("Terms", "", ""),
+                row("Terms", "", ""),
+            ]
+        );
+    }
+
     fn parse(args: &[&str]) -> HeaderArgs {
         Cli::try_parse_from(std::iter::once("presswork").chain(args.iter().copied()))
             .unwrap()
@@ -542,6 +615,7 @@ mod tests {
             title: "Invoice 42".into(),
             doctitle: "Invoices".into(),
             now: NaiveDateTime::parse_from_str("2026-03-07 09:05:01", "%Y-%m-%d %H:%M:%S").unwrap(),
+            sections: vec![[String::new(), String::new(), String::new()]],
         }
     }
 

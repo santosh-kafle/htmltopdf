@@ -7,8 +7,8 @@ use selectors::parser::Selector;
 
 use crate::computed::{ComputedStyle, TextDecorations};
 use crate::hints::presentational_hints;
-use crate::properties::{Display, LonghandId, PropertyDeclaration};
-use crate::selector::{ElementRef, Simple};
+use crate::properties::{Content, Display, LonghandId, PropertyDeclaration};
+use crate::selector::{ElementRef, PseudoElement, Simple};
 use crate::stylesheet::{
     Declaration, FontFace, PageRule, Stylesheet, media_matches, parse_style_attribute,
 };
@@ -42,10 +42,19 @@ enum Level {
 /// How deep `@import`s may nest.
 const MAX_IMPORT_DEPTH: usize = 16;
 
+/// A pseudo-element that generates content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Pseudo {
+    Before,
+    After,
+}
+
 /// One selector of a style rule with the rule's declarations.
 #[derive(Debug)]
 struct CascadeRule {
     origin: Origin,
+    /// The pseudo-element the rule styles, or `None` for the element.
+    pseudo: Option<Pseudo>,
     selector: Selector<Simple>,
     specificity: u32,
     /// Index into [`Stylist::blocks`].
@@ -194,19 +203,90 @@ impl Stylist {
             let block = self.blocks.len();
             self.blocks.push(rule.declarations);
             for selector in rule.selectors.slice() {
-                // Generated content is not supported, so rules for
-                // pseudo-elements never apply.
-                if selector.has_pseudo_element() {
-                    continue;
-                }
+                let pseudo = match selector.pseudo_element() {
+                    None => None,
+                    Some(PseudoElement::Before) => Some(Pseudo::Before),
+                    Some(PseudoElement::After) => Some(Pseudo::After),
+                    // Other pseudo-elements (`::marker`) are not supported.
+                    Some(PseudoElement::Other) => continue,
+                };
                 self.rules.push(CascadeRule {
                     origin,
+                    pseudo,
                     specificity: selector.specificity(),
                     selector: selector.clone(),
                     block,
                 });
             }
         }
+    }
+
+    /// The declarations of the rules for `pseudo` (or the element itself)
+    /// that match `element`, with their cascade positions.
+    fn matching_declarations(
+        &self,
+        element: ElementRef<'_>,
+        pseudo: Option<Pseudo>,
+    ) -> Vec<(Level, u32, PropertyDeclaration)> {
+        let mut applicable = Vec::new();
+        let mut caches = SelectorCaches::default();
+        for rule in self.rules.iter().filter(|rule| rule.pseudo == pseudo) {
+            if !element.matches(&rule.selector, pseudo.is_some(), &mut caches) {
+                continue;
+            }
+            for declaration in &self.blocks[rule.block] {
+                let level = match (rule.origin, declaration.important) {
+                    (Origin::UserAgent, false) => Level::UserAgent,
+                    (Origin::UserAgent, true) => Level::UserAgentImportant,
+                    (Origin::User, false) => Level::User,
+                    (Origin::User, true) => Level::UserImportant,
+                    (Origin::Author, false) => Level::Author,
+                    (Origin::Author, true) => Level::AuthorImportant,
+                };
+                applicable.push((level, rule.specificity, declaration.property.clone()));
+            }
+        }
+        applicable
+    }
+
+    /// Whether a document or user rule styles `::before` or `::after`.
+    /// The built-in stylesheet only does for `<q>`.
+    pub fn has_generated_content(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.pseudo.is_some() && rule.origin != Origin::UserAgent)
+    }
+
+    /// The style of the `pseudo` element of `node`, whose own style is
+    /// `element_style`, if it generates content: rules for it set
+    /// `content` to something other than `normal` or `none`, and
+    /// `display` is not `none`.
+    pub fn pseudo_style(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        pseudo: Pseudo,
+        element_style: &ComputedStyle,
+    ) -> Option<ComputedStyle> {
+        let element = ElementRef::new(doc, node)?;
+        let mut applicable = self.matching_declarations(element, Some(pseudo));
+        if applicable.is_empty() {
+            return None;
+        }
+        applicable.sort_by_key(|(level, specificity, _)| (*level, *specificity));
+        let mut style = ComputedStyle::inheriting(element_style);
+        let is_font_size = |d: &PropertyDeclaration| d.id() == LonghandId::FontSize;
+        for (_, _, declaration) in applicable.iter().filter(|(_, _, d)| is_font_size(d)) {
+            style.apply(declaration, element_style);
+        }
+        for (_, _, declaration) in applicable.iter().filter(|(_, _, d)| !is_font_size(d)) {
+            style.apply(declaration, element_style);
+        }
+        if style.display == Display::InlineBlock {
+            style.inherited_decorations = TextDecorations::NONE;
+        }
+        let generates = matches!(style.content, Content::Items(_));
+        (generates && style.display != Display::None).then_some(style)
     }
 
     /// The document's `@page` descriptors.
@@ -243,24 +323,7 @@ impl Stylist {
         }
 
         // Gather every declaration that applies, with its cascade position.
-        let mut applicable: Vec<(Level, u32, PropertyDeclaration)> = Vec::new();
-        let mut caches = SelectorCaches::default();
-        for rule in &self.rules {
-            if !element.matches(&rule.selector, &mut caches) {
-                continue;
-            }
-            for declaration in &self.blocks[rule.block] {
-                let level = match (rule.origin, declaration.important) {
-                    (Origin::UserAgent, false) => Level::UserAgent,
-                    (Origin::UserAgent, true) => Level::UserAgentImportant,
-                    (Origin::User, false) => Level::User,
-                    (Origin::User, true) => Level::UserImportant,
-                    (Origin::Author, false) => Level::Author,
-                    (Origin::Author, true) => Level::AuthorImportant,
-                };
-                applicable.push((level, rule.specificity, declaration.property.clone()));
-            }
-        }
+        let mut applicable = self.matching_declarations(element, None);
         for hint in presentational_hints(doc, node, data) {
             applicable.push((Level::Hint, 0, hint));
         }
@@ -351,6 +414,36 @@ mod tests {
     }
 
     const RED: Color = Color::rgb(255, 0, 0);
+
+    #[test]
+    fn pseudo_elements_get_their_own_style_when_they_generate_content() {
+        let html = "<style>p::before { content: 'x'; color: red } p::after { color: red }
+                    .b::after { content: 'y'; display: none }</style>
+                    <p class=b>text</p>";
+        let doc = parse_html(html.as_bytes());
+        let stylist = Stylist::for_document(&doc, &Fetcher::data_only());
+        let p = doc.find_element("p").unwrap();
+        let style = style_of(html, "p");
+        assert_ne!(
+            style.color, RED,
+            "rules for pseudo-elements do not style the element"
+        );
+        let before = stylist.pseudo_style(&doc, p, Pseudo::Before, &style);
+        let before = before.expect("content set");
+        assert_eq!(before.color, RED);
+        assert_eq!(
+            before.font_size, style.font_size,
+            "inherits from the element"
+        );
+        // No content, or display: none.
+        assert!(
+            stylist
+                .pseudo_style(&doc, p, Pseudo::After, &style)
+                .is_none()
+        );
+        assert!(stylist.has_generated_content());
+        assert!(!Stylist::new().has_generated_content());
+    }
     const BLUE: Color = Color::rgb(0, 0, 255);
 
     #[test]

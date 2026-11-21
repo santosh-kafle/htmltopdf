@@ -171,7 +171,10 @@ keyword_enum! {
         Disc = "disc",
         Circle = "circle",
         Square = "square",
-        Decimal = "decimal" | "decimal-leading-zero",
+        Decimal = "decimal",
+        DecimalLeadingZero = "decimal-leading-zero",
+        /// Devanagari digits, as used in Nepali and Hindi.
+        Devanagari = "devanagari",
         LowerAlpha = "lower-alpha" | "lower-latin",
         UpperAlpha = "upper-alpha" | "upper-latin",
         LowerRoman = "lower-roman",
@@ -300,6 +303,44 @@ pub enum LineHeight {
     Percent(f32),
 }
 
+/// One part of a `content` value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentItem {
+    Text(Arc<str>),
+    /// `counter(name, style)`: the innermost counter of that name.
+    Counter {
+        name: Arc<str>,
+        style: ListStyleType,
+    },
+    /// `counters(name, separator, style)`: all counters of that name,
+    /// outermost first.
+    Counters {
+        name: Arc<str>,
+        separator: Arc<str>,
+        style: ListStyleType,
+    },
+    /// `attr(name)`: the element's attribute, or nothing.
+    Attr(Arc<str>),
+    OpenQuote,
+    CloseQuote,
+    NoOpenQuote,
+    NoCloseQuote,
+}
+
+/// The `content` property. On `::before` and `::after`, `normal` and
+/// `none` both generate nothing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Content {
+    #[default]
+    Normal,
+    None,
+    Items(Arc<[ContentItem]>),
+}
+
+/// The value of `counter-reset`, `counter-increment` or `counter-set`:
+/// counter names with their values. `none` is empty.
+pub type CounterChanges = Arc<[(Arc<str>, i32)]>;
+
 /// A longhand property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LonghandId {
@@ -340,6 +381,10 @@ pub enum LonghandId {
     Orphans,
     Widows,
     TableLayout,
+    Content,
+    CounterReset,
+    CounterIncrement,
+    CounterSet,
 }
 
 impl LonghandId {
@@ -353,7 +398,8 @@ impl LonghandId {
             Display | BackgroundColor | Margin(_) | Padding(_) | BorderWidth(_)
             | BorderStyle(_) | BorderColor(_) | Width | Height | MaxWidth | MaxHeight
             | MinHeight | BoxSizing | VerticalAlign | BreakBefore | BreakAfter
-            | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout => false,
+            | TextDecorationLine | TextDecorationColor | BreakInside | TableLayout | Content
+            | CounterReset | CounterIncrement | CounterSet => false,
         }
     }
 
@@ -393,6 +439,10 @@ impl LonghandId {
             Orphans,
             Widows,
             TableLayout,
+            Content,
+            CounterReset,
+            CounterIncrement,
+            CounterSet,
         ];
         let sided = Side::ALL.into_iter().flat_map(|side| {
             [
@@ -456,6 +506,10 @@ pub enum PropertyDeclaration {
     /// At least 1.
     Widows(u32),
     TableLayout(TableLayout),
+    Content(Content),
+    CounterReset(CounterChanges),
+    CounterIncrement(CounterChanges),
+    CounterSet(CounterChanges),
     /// `inherit`, `initial` or `unset` for the given property.
     CssWide(LonghandId, CssWide),
 }
@@ -502,6 +556,10 @@ impl PropertyDeclaration {
             D::Orphans(_) => LonghandId::Orphans,
             D::Widows(_) => LonghandId::Widows,
             D::TableLayout(_) => LonghandId::TableLayout,
+            D::Content(_) => LonghandId::Content,
+            D::CounterReset(_) => LonghandId::CounterReset,
+            D::CounterIncrement(_) => LonghandId::CounterIncrement,
+            D::CounterSet(_) => LonghandId::CounterSet,
             D::CssWide(id, _) => *id,
         }
     }
@@ -563,6 +621,10 @@ pub fn longhands_of(name: &str) -> Option<Vec<LonghandId>> {
         "orphans" => one(L::Orphans),
         "widows" => one(L::Widows),
         "table-layout" => one(L::TableLayout),
+        "content" => one(L::Content),
+        "counter-reset" => one(L::CounterReset),
+        "counter-increment" => one(L::CounterIncrement),
+        "counter-set" => one(L::CounterSet),
         "min-height" => one(L::MinHeight),
         "text-decoration-line" => one(L::TextDecorationLine),
         "text-decoration-color" => one(L::TextDecorationColor),
@@ -704,6 +766,10 @@ fn parse_longhand(id: LonghandId, input: &mut Parser<'_>) -> Parsed<PropertyDecl
         L::Orphans => D::Orphans(parse_line_count(input)?),
         L::Widows => D::Widows(parse_line_count(input)?),
         L::TableLayout => D::TableLayout(TableLayout::parse(input)?),
+        L::Content => D::Content(parse_content(input)?),
+        L::CounterReset => D::CounterReset(parse_counter_changes(input, 0)?),
+        L::CounterIncrement => D::CounterIncrement(parse_counter_changes(input, 1)?),
+        L::CounterSet => D::CounterSet(parse_counter_changes(input, 0)?),
     })
 }
 
@@ -1094,6 +1160,107 @@ fn parse_spacing(input: &mut Parser<'_>) -> Parsed<Length> {
     Length::parse(input)
 }
 
+/// `content`: `normal`, `none`, or strings, counters, attributes and
+/// quotes. Images are not supported.
+fn parse_content(input: &mut Parser<'_>) -> Parsed<Content> {
+    if input
+        .try_parse(|i| i.expect_ident_matching("normal"))
+        .is_ok()
+    {
+        return Ok(Content::Normal);
+    }
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(Content::None);
+    }
+    let mut items = Vec::new();
+    while !input.is_exhausted() {
+        let item = match input.next().map_err(Invalid::from)?.clone() {
+            Token::QuotedString(text) => ContentItem::Text(text.as_ref().into()),
+            Token::Ident(ident) => match ident.to_ascii_lowercase().as_str() {
+                "open-quote" => ContentItem::OpenQuote,
+                "close-quote" => ContentItem::CloseQuote,
+                "no-open-quote" => ContentItem::NoOpenQuote,
+                "no-close-quote" => ContentItem::NoCloseQuote,
+                _ => return Err(Invalid),
+            },
+            Token::Function(name) => {
+                let name = name.to_ascii_lowercase();
+                input.parse_nested_block(|i| {
+                    parse_content_function(&name, i)
+                        .map_err(|_| i.new_error_for_next_token::<Invalid>())
+                })?
+            }
+            _ => return Err(Invalid),
+        };
+        items.push(item);
+    }
+    if items.is_empty() {
+        return Err(Invalid);
+    }
+    Ok(Content::Items(items.into()))
+}
+
+/// The arguments of `counter()`, `counters()` or `attr()` in `content`.
+fn parse_content_function(name: &str, input: &mut Parser<'_>) -> Parsed<ContentItem> {
+    let counter_style = |i: &mut Parser<'_>| -> Parsed<ListStyleType> {
+        if i.try_parse(|i| i.expect_comma()).is_ok() {
+            ListStyleType::parse(i)
+        } else {
+            Ok(ListStyleType::Decimal)
+        }
+    };
+    let item = match name {
+        "counter" => {
+            let name = input.expect_ident_cloned().map_err(Invalid::from)?;
+            ContentItem::Counter {
+                name: name.as_ref().into(),
+                style: counter_style(input)?,
+            }
+        }
+        "counters" => {
+            let name = input.expect_ident_cloned().map_err(Invalid::from)?;
+            input.expect_comma().map_err(Invalid::from)?;
+            let separator = input.expect_string_cloned().map_err(Invalid::from)?;
+            ContentItem::Counters {
+                name: name.as_ref().into(),
+                separator: separator.as_ref().into(),
+                style: counter_style(input)?,
+            }
+        }
+        "attr" => {
+            let name = input.expect_ident_cloned().map_err(Invalid::from)?;
+            ContentItem::Attr(name.to_ascii_lowercase().into())
+        }
+        _ => return Err(Invalid),
+    };
+    input.expect_exhausted().map_err(Invalid::from)?;
+    Ok(item)
+}
+
+/// `counter-reset`, `counter-increment`, `counter-set`: `none`, or counter
+/// names, each optionally followed by an integer (else `default`).
+fn parse_counter_changes(input: &mut Parser<'_>, default: i32) -> Parsed<CounterChanges> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(Arc::from([]));
+    }
+    let mut changes = Vec::new();
+    while !input.is_exhausted() {
+        let name = input.expect_ident_cloned().map_err(Invalid::from)?;
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "none" | "initial" | "inherit" | "unset" | "default"
+        ) {
+            return Err(Invalid);
+        }
+        let value = input.try_parse(|i| i.expect_integer()).unwrap_or(default);
+        changes.push((Arc::from(name.as_ref()), value));
+    }
+    if changes.is_empty() {
+        return Err(Invalid);
+    }
+    Ok(changes.into())
+}
+
 /// `orphans` / `widows`: a positive integer.
 fn parse_line_count(input: &mut Parser<'_>) -> Parsed<u32> {
     let count = input.expect_integer().map_err(Invalid::from)?;
@@ -1127,6 +1294,75 @@ mod tests {
         let mut out = Vec::new();
         parse_declaration(name, &mut parser, &mut out)?;
         Ok(out)
+    }
+
+    #[test]
+    fn parses_content() {
+        let text = |t: &str| ContentItem::Text(t.into());
+        assert_eq!(
+            parse(
+                "content",
+                r#"counter(sec) ". " counters(item, ".", lower-roman) attr(HREF)"#
+            ),
+            Ok(vec![D::Content(Content::Items(
+                vec![
+                    ContentItem::Counter {
+                        name: "sec".into(),
+                        style: ListStyleType::Decimal
+                    },
+                    text(". "),
+                    ContentItem::Counters {
+                        name: "item".into(),
+                        separator: ".".into(),
+                        style: ListStyleType::LowerRoman
+                    },
+                    ContentItem::Attr("href".into()),
+                ]
+                .into()
+            ))])
+        );
+        assert_eq!(
+            parse("content", "open-quote close-quote"),
+            Ok(vec![D::Content(Content::Items(
+                vec![ContentItem::OpenQuote, ContentItem::CloseQuote].into()
+            ))])
+        );
+        assert_eq!(
+            parse("content", "none"),
+            Ok(vec![D::Content(Content::None)])
+        );
+        assert_eq!(
+            parse("content", "normal"),
+            Ok(vec![D::Content(Content::Normal)])
+        );
+        assert!(parse("content", "url(a.png)").is_err());
+        assert!(parse("content", "counter(a, banana)").is_err());
+        assert!(parse("content", "\"a\" none").is_err());
+    }
+
+    #[test]
+    fn parses_counter_changes() {
+        let changes = |list: &[(&str, i32)]| -> CounterChanges {
+            list.iter()
+                .map(|(name, value)| (Arc::from(*name), *value))
+                .collect()
+        };
+        assert_eq!(
+            parse("counter-reset", "sec sub 3"),
+            Ok(vec![D::CounterReset(changes(&[("sec", 0), ("sub", 3)]))])
+        );
+        assert_eq!(
+            parse("counter-increment", "item -2 row"),
+            Ok(vec![D::CounterIncrement(changes(&[
+                ("item", -2),
+                ("row", 1)
+            ]))])
+        );
+        assert_eq!(
+            parse("counter-set", "none"),
+            Ok(vec![D::CounterSet(changes(&[]))])
+        );
+        assert!(parse("counter-reset", "3").is_err());
     }
 
     #[test]
@@ -1353,6 +1589,6 @@ mod tests {
         let all: Vec<_> = LonghandId::all().collect();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), unique.len());
-        assert_eq!(all.len(), 32 + 4 * 5);
+        assert_eq!(all.len(), 36 + 4 * 5);
     }
 }

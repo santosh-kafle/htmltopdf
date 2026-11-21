@@ -25,6 +25,7 @@
 
 mod boxes;
 mod fonts;
+pub(crate) mod generated;
 mod inline;
 mod inline_block;
 mod replaced;
@@ -37,17 +38,18 @@ use std::sync::Arc;
 
 use parley::{FontContext, LayoutContext};
 use presswork_dom::resource::{Fetcher, LoadError};
-use presswork_dom::{Document, NodeId, NodeKind};
+use presswork_dom::{Document, ElementData, NodeId, NodeKind};
 use presswork_style::{
-    Break, BreakInside, Color, ComputedStyle, Dimension, Display, Side, Stylist,
+    Break, BreakInside, Color, ComputedStyle, Dimension, Display, Pseudo, Side, Stylist,
 };
 
-use crate::fragment::{Fill, ImageData, Item};
-use crate::geometry::Rect;
+use crate::fragment::{Fill, ImageData, Item, LinkTarget, Mark, MarkKind};
+use crate::geometry::{Point, Rect};
 use boxes::BoxGeometry;
 pub(crate) use fonts::GenericFonts;
+use generated::PseudoBox;
 pub(crate) use inline::Ink;
-use inline::Inline;
+use inline::{ElementKey, Inline};
 pub(crate) use webfonts::WebFonts;
 #[cfg(test)]
 pub(crate) use webfonts::tests as webfont_tests;
@@ -239,6 +241,8 @@ pub(crate) struct Context<'a> {
     pub load_images: bool,
     /// Images by URL, `None` for those that failed, so each loads once.
     pub images: HashMap<String, Option<Arc<ImageData>>>,
+    /// The `::before` and `::after` boxes of the document.
+    pub generated: &'a generated::GeneratedContent,
 }
 
 impl Context<'_> {
@@ -320,6 +324,12 @@ pub(crate) struct Flow<'c, 'a> {
     /// The baseline of the last line laid out, the baseline of an
     /// inline-block.
     baseline: Option<f64>,
+    /// The target of the block-level link being laid out: its lines are
+    /// clickable.
+    link: Option<LinkTarget>,
+    /// Marks for the boxes just opened, with their left edges: they go
+    /// at the top of the next slice, the boxes' first content.
+    pending_marks: Vec<(f32, MarkKind)>,
 }
 
 /// A box entered with [`Flow::open_box`].
@@ -352,6 +362,8 @@ impl<'c, 'a> Flow<'c, 'a> {
             keep_next: false,
             tracked: None,
             baseline: None,
+            link: None,
+            pending_marks: Vec::new(),
         }
     }
 
@@ -372,6 +384,10 @@ impl<'c, 'a> Flow<'c, 'a> {
     /// Finishes the flow, returning its content and total height.
     pub fn finish(mut self) -> (Canvas, f64) {
         self.settle_margin();
+        if !self.pending_marks.is_empty() {
+            // Empty boxes at the end still have a place to link to.
+            self.push_slice(self.y, 0.0, Vec::new());
+        }
         (self.canvas, self.y)
     }
 
@@ -410,7 +426,8 @@ impl<'c, 'a> Flow<'c, 'a> {
     }
 
     /// Adds a slice `height` tall at `top`, with items relative to it.
-    fn push_slice(&mut self, top: f64, height: f32, items: Vec<Item>) {
+    fn push_slice(&mut self, top: f64, height: f32, mut items: Vec<Item>) {
+        items.extend(self.pending_marks.drain(..).map(|(x, kind)| mark(x, kind)));
         self.canvas.slices.push(Slice {
             top,
             height,
@@ -438,8 +455,67 @@ impl<'c, 'a> Flow<'c, 'a> {
             return self.block_image(id, style, x, width);
         }
         if style.display == Display::Table {
+            self.mark_element(id, x);
             return self.table(id, style, x, width);
         }
+        self.block_box(Source::Element(id), style, x, width);
+    }
+
+    /// Records the marks of the element `id`, whose box starts at `x`:
+    /// its anchor name, and its heading title.
+    fn mark_element(&mut self, id: NodeId, x: f32) {
+        if self.is_measuring() {
+            return;
+        }
+        let doc = self.cx.doc;
+        let Some(element) = doc.element(id) else {
+            return;
+        };
+        if let Some(name) = anchor_name(element) {
+            self.pending_marks.push((x, MarkKind::Anchor(name)));
+        }
+        if let Some(level) = heading_level(&element.name) {
+            let text = doc.text_content(id);
+            let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !title.is_empty() {
+                let kind = MarkKind::Heading {
+                    level,
+                    title: title.into(),
+                };
+                self.pending_marks.push((x, kind));
+            }
+        }
+    }
+
+    /// Where the element `id` links to, if it is a link (`<a href>`).
+    /// Fragments of the document's own URL are anchors in it.
+    fn link_target(&self, id: NodeId) -> Option<LinkTarget> {
+        let element = self.cx.doc.element(id)?;
+        if element.name != "a" {
+            return None;
+        }
+        let href = element.attr("href")?.trim();
+        if let Some(fragment) = href.strip_prefix('#') {
+            return (!fragment.is_empty()).then(|| LinkTarget::Anchor(percent_decode(fragment)));
+        }
+        let fetcher = self.cx.fetcher;
+        let url = fetcher.resolve(href, None).ok()?;
+        if url.scheme() == "javascript" {
+            return None;
+        }
+        if let (Some(fragment), Some(base)) = (url.fragment(), fetcher.base()) {
+            let (mut url, mut base) = (url.clone(), base.clone());
+            url.set_fragment(None);
+            base.set_fragment(None);
+            if url == base && !fragment.is_empty() {
+                return Some(LinkTarget::Anchor(percent_decode(fragment)));
+            }
+        }
+        Some(LinkTarget::Url(url.as_str().into()))
+    }
+
+    /// Lays out a block container holding `source`.
+    fn block_box(&mut self, source: Source<'_>, style: &ComputedStyle, x: f32, width: f32) {
         let geometry = BoxGeometry::resolve(style, width, None);
         if self.is_measuring()
             && let Dimension::Pt(_) = style.width
@@ -449,7 +525,21 @@ impl<'c, 'a> Flow<'c, 'a> {
             self.record_extent(outer, outer);
             return;
         }
-        let tracked = self.tracked.is_some_and(|(tracked, _)| tracked == id);
+        let tracked = match source {
+            Source::Element(id) => self.tracked.is_some_and(|(tracked, _)| tracked == id),
+            Source::Generated(_) => false,
+        };
+        let link = match source {
+            Source::Element(id) => {
+                self.mark_element(id, x + geometry.border_box_x());
+                self.link_target(id)
+            }
+            Source::Generated(_) => None,
+        };
+        let outer_link = match link {
+            Some(link) => self.link.replace(link),
+            None => self.link.clone(),
+        };
         let min_height = geometry.min_content_height(style);
         let sized = min_height > 0.0 && !self.is_measuring();
         // A box with a height needs a decoration to know where its content
@@ -458,7 +548,13 @@ impl<'c, 'a> Flow<'c, 'a> {
         if tracked && let Some((_, index)) = &mut self.tracked {
             *index = open.decoration;
         }
-        self.block_contents(id, style, x + geometry.content_x(), geometry.content_width);
+        self.contents(
+            source,
+            style,
+            x + geometry.content_x(),
+            geometry.content_width,
+        );
+        self.link = outer_link;
         if sized && let Some(index) = open.decoration {
             self.extend_to(index, geometry.top_edge(), min_height);
         }
@@ -562,6 +658,19 @@ impl<'c, 'a> Flow<'c, 'a> {
         }
     }
 
+    /// Lays out what a block container holds; its content box starts at
+    /// `x` and is `width` wide.
+    fn contents(&mut self, source: Source<'_>, style: &ComputedStyle, x: f32, width: f32) {
+        match source {
+            Source::Element(id) => self.block_contents(id, style, x, width),
+            Source::Generated(text) => {
+                let mut inline = Inline::first();
+                inline.push_text(text, style);
+                self.paragraph(inline, style, x, width);
+            }
+        }
+    }
+
     /// Lays out the children of the block container `id`, whose content
     /// box starts at `x` and is `width` wide.
     fn block_contents(&mut self, id: NodeId, style: &ComputedStyle, x: f32, width: f32) {
@@ -586,11 +695,21 @@ impl<'c, 'a> Flow<'c, 'a> {
         inline: &mut Inline,
     ) {
         let doc = self.cx.doc;
+        let generated = self.cx.generated.get(&id);
+        if let Some(before) = generated.and_then(|g| g.get(Pseudo::Before)) {
+            self.pseudo_box((id, Some(Pseudo::Before)), before, style, x, width, inline);
+        }
         for child in doc.children(id) {
             match &doc.node(child).kind {
                 NodeKind::Text(text) => inline.push_text(text, style),
                 NodeKind::Element(element) => {
                     let child_style = self.cx.styles.style(doc, child, Some(style));
+                    let display = child_style.display;
+                    if matches!(display, Display::Inline | Display::InlineBlock)
+                        && let Some(name) = anchor_name(element)
+                    {
+                        inline.anchor(name);
+                    }
                     match child_style.display {
                         Display::None => {}
                         Display::Inline if element.name == "br" => inline.push_break(&child_style),
@@ -600,12 +719,14 @@ impl<'c, 'a> Flow<'c, 'a> {
                             self.inline_image(child, &child_style, width, inline);
                         }
                         Display::Inline => {
-                            inline.enter(child, &child_style, width);
+                            let link = self.link_target(child);
+                            inline.enter((child, None), &child_style, width, link);
                             self.children(child, &child_style, x, width, inline);
-                            inline.leave(child);
+                            inline.leave((child, None));
                         }
                         Display::InlineBlock => {
-                            self.inline_block(child, &child_style, width, inline);
+                            let source = Source::Element(child);
+                            self.inline_block(source, &child_style, width, inline);
                         }
                         _ => {
                             let rest = inline.continuation();
@@ -617,5 +738,98 @@ impl<'c, 'a> Flow<'c, 'a> {
                 _ => {}
             }
         }
+        if let Some(after) = generated.and_then(|g| g.get(Pseudo::After)) {
+            self.pseudo_box((id, Some(Pseudo::After)), after, style, x, width, inline);
+        }
     }
+
+    /// Lays out a `::before` or `::after` box among the children of the
+    /// element whose style is `parent_style`.
+    fn pseudo_box(
+        &mut self,
+        key: ElementKey,
+        pseudo: &PseudoBox,
+        parent_style: &ComputedStyle,
+        x: f32,
+        width: f32,
+        inline: &mut Inline,
+    ) {
+        let style = &pseudo.style;
+        match style.display {
+            Display::None => {}
+            Display::Inline => {
+                inline.enter(key, style, width, None);
+                inline.push_text(&pseudo.text, style);
+                inline.leave(key);
+            }
+            Display::InlineBlock => {
+                self.inline_block(Source::Generated(&pseudo.text), style, width, inline);
+            }
+            _ => {
+                let rest = inline.continuation();
+                self.paragraph(std::mem::replace(inline, rest), parent_style, x, width);
+                self.block_box(Source::Generated(&pseudo.text), style, x, width);
+            }
+        }
+    }
+}
+
+/// An item marking a place at the top of a slice, `x` from the canvas's
+/// left edge.
+pub(super) fn mark(x: f32, kind: MarkKind) -> Item {
+    Item::Mark(Mark {
+        origin: Point { x, y: 0.0 },
+        kind,
+    })
+}
+
+/// The name links reach `element` by: its `id`, or the `name` of an
+/// `<a>`.
+fn anchor_name(element: &ElementData) -> Option<Arc<str>> {
+    let name = element.attr("id").or_else(|| {
+        (element.name == "a")
+            .then(|| element.attr("name"))
+            .flatten()
+    })?;
+    (!name.is_empty()).then(|| name.into())
+}
+
+/// The outline level of a heading element (`h1` is 1).
+fn heading_level(name: &str) -> Option<u8> {
+    match name.as_bytes() {
+        [b'h', level @ b'1'..=b'6'] => Some(level - b'0'),
+        _ => None,
+    }
+}
+
+/// Decodes `%XX` escapes in a URL fragment (an `id` in Devanagari is
+/// percent-encoded in a resolved URL).
+fn percent_decode(text: &str) -> Arc<str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((high * 16 + low) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into()
+}
+
+/// What a block container holds: an element's children, or the text of
+/// a generated box.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Source<'g> {
+    Element(NodeId),
+    Generated(&'g str),
 }

@@ -23,6 +23,10 @@ pub enum Item {
     Text(TextRun),
     Fill(Fill),
     Image(Image),
+    /// A clickable area; draws nothing.
+    Link(Link),
+    /// A place in the document; draws nothing.
+    Mark(Mark),
 }
 
 impl Item {
@@ -31,11 +35,47 @@ impl Item {
             Item::Text(run) => &mut run.origin,
             Item::Fill(fill) => &mut fill.rect.origin,
             Item::Image(image) => &mut image.rect.origin,
+            Item::Link(link) => &mut link.rect.origin,
+            Item::Mark(mark) => &mut mark.origin,
         };
         origin.x += dx;
         origin.y += dy;
         self
     }
+}
+
+/// The area of a hyperlink (`<a href>`) on a page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub rect: Rect,
+    pub target: LinkTarget,
+}
+
+/// Where a link goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An absolute URL outside the document.
+    Url(Arc<str>),
+    /// An element of the document, by `id` (or `<a name>`); see
+    /// [`MarkKind::Anchor`].
+    Anchor(Arc<str>),
+}
+
+/// A place in the document that links and the outline point to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mark {
+    /// The top-left of the element's first line or box.
+    pub origin: Point,
+    pub kind: MarkKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkKind {
+    /// An element with an `id`, or an `<a name>`.
+    Anchor(Arc<str>),
+    /// A heading (`<h1>` to `<h6>`), for the PDF outline and the
+    /// `[section]` header variables.
+    Heading { level: u8, title: Arc<str> },
 }
 
 /// A filled rectangle: a background or one edge of a border.

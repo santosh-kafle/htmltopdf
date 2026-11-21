@@ -1,16 +1,15 @@
 //! `display: inline-block`: a block container laid out on its own, then
 //! placed in a line like an image.
 
-use presswork_dom::NodeId;
 use presswork_style::{ComputedStyle, Dimension};
 
 use super::boxes::BoxGeometry;
 use super::inline::{Inline, InlineObject};
-use super::{BoxPaint, Flow};
+use super::{BoxPaint, Flow, Source};
 use crate::geometry::Rect;
 
 impl Flow<'_, '_> {
-    /// Lays out the inline-block `id` in a containing block `width` wide
+    /// Lays out an inline-block holding `source` in a containing block `width` wide
     /// and adds it to `inline`.
     ///
     /// Without a `width` it shrinks to fit its content (CSS 2.1 section
@@ -20,7 +19,7 @@ impl Flow<'_, '_> {
     /// lines (section 10.8.1), and is never split across pages.
     pub(super) fn inline_block(
         &mut self,
-        id: NodeId,
+        source: Source<'_>,
         style: &ComputedStyle,
         width: f32,
         inline: &mut Inline,
@@ -51,7 +50,7 @@ impl Flow<'_, '_> {
         let cap = |width: f32| max_width.map_or(width, |max| width.min(max)).max(0.0);
         let (min, preferred) = match specified {
             Some(width) => (width, width),
-            None => self.measure_contents(id, style),
+            None => self.measure_contents(source, style),
         };
 
         if measuring {
@@ -75,8 +74,13 @@ impl Flow<'_, '_> {
             padding,
             content_width,
         };
+        let link = match source {
+            Source::Element(id) => self.link_target(id),
+            Source::Generated(_) => None,
+        };
         let mut flow = Flow::new(self.cx);
-        flow.block_contents(id, style, 0.0, content_width);
+        flow.link = link;
+        flow.contents(source, style, 0.0, content_width);
         let baseline = flow.baseline;
         let (canvas, height) = flow.finish();
         let content_height = (height as f32).max(geometry.min_content_height(style));
@@ -109,11 +113,10 @@ impl Flow<'_, '_> {
         inline.push_box(object, style);
     }
 
-    /// The min- and max-content widths of the content of the block
-    /// container `id`.
-    fn measure_contents(&mut self, id: NodeId, style: &ComputedStyle) -> (f32, f32) {
+    /// The min- and max-content widths of what a block container holds.
+    fn measure_contents(&mut self, source: Source<'_>, style: &ComputedStyle) -> (f32, f32) {
         let mut flow = Flow::measuring(self.cx);
-        flow.block_contents(id, style, 0.0, 0.0);
+        flow.contents(source, style, 0.0, 0.0);
         let extent = flow.extent();
         (extent.min, extent.max)
     }

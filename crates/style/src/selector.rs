@@ -102,8 +102,8 @@ impl NonTSPseudoClass for PseudoClass {
     }
 }
 
-/// Pseudo-elements. They parse, so that rules using them are valid, but
-/// generated content is not supported yet and such rules are skipped.
+/// Pseudo-elements. `::before` and `::after` generate content; rules for
+/// others parse, so that they are valid, but are skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PseudoElement {
     Before,
@@ -234,14 +234,27 @@ impl<'a> ElementRef<'a> {
     }
 
     /// Whether `selector` matches this element.
-    pub fn matches(&self, selector: &Selector<Simple>, caches: &mut SelectorCaches) -> bool {
+    /// Whether `selector` matches the element or, if `pseudo`, its
+    /// pseudo-element (the selector's pseudo-element is checked by the
+    /// caller).
+    pub fn matches(
+        &self,
+        selector: &Selector<Simple>,
+        pseudo: bool,
+        caches: &mut SelectorCaches,
+    ) -> bool {
         let quirks = if self.doc.quirks_mode {
             QuirksMode::Quirks
         } else {
             QuirksMode::NoQuirks
         };
+        let mode = if pseudo {
+            MatchingMode::ForStatelessPseudoElement
+        } else {
+            MatchingMode::Normal
+        };
         let mut context = MatchingContext::new(
-            MatchingMode::Normal,
+            mode,
             None,
             caches,
             quirks,
@@ -429,7 +442,7 @@ mod tests {
             .filter(|element| {
                 list.slice()
                     .iter()
-                    .any(|selector| element.matches(selector, &mut caches))
+                    .any(|selector| element.matches(selector, false, &mut caches))
             })
             .map(|element| {
                 let data = element.data();

@@ -26,7 +26,7 @@ enum Kind {
     /// `--version`: prints a wkhtmltopdf-style version line.
     Version,
     /// Not implemented yet, but only affects things presswork does not do
-    /// anyway (fetching, links, outline); dropped with a warning that
+    /// anyway (fetching, forms, ...); dropped with a warning that
     /// `--quiet` silences, along with its values.
     Ignore(usize),
     /// Not implemented yet and changes what ends up on the page (HTML
@@ -90,9 +90,9 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     // Outline options.
     ("dump-default-toc-xsl", None, Ignore(0)),
     ("dump-outline", None, Ignore(1)),
-    ("outline", None, Ignore(0)),
-    ("no-outline", None, Ignore(0)),
-    ("outline-depth", None, Ignore(1)),
+    ("outline", None, Pass(0)),
+    ("no-outline", None, Pass(0)),
+    ("outline-depth", None, Pass(1)),
     // Page options.
     ("background", None, Ignore(0)),
     ("no-background", None, Lossy(0)),
@@ -107,12 +107,12 @@ const OPTIONS: &[(&str, Option<char>, Kind)] = &[
     ("debug-javascript", None, Ignore(0)),
     ("default-header", None, Pass(0)),
     ("encoding", None, Lossy(1)),
-    ("disable-external-links", None, Ignore(0)),
-    ("enable-external-links", None, Ignore(0)),
+    ("disable-external-links", None, Pass(0)),
+    ("enable-external-links", None, Pass(0)),
     ("disable-forms", None, Ignore(0)),
     ("enable-forms", None, Ignore(0)),
-    ("disable-internal-links", None, Ignore(0)),
-    ("enable-internal-links", None, Ignore(0)),
+    ("disable-internal-links", None, Pass(0)),
+    ("enable-internal-links", None, Pass(0)),
     ("enable-javascript", None, Lossy(0)),
     ("javascript-delay", None, Lossy(1)),
     ("keep-relative-links", None, Ignore(0)),
@@ -339,14 +339,14 @@ mod tests {
             "--cookie",
             "name",
             "value",
-            "--outline",
+            "--disable-forms",
             "--viewport-size",
             "800x600",
             "in.html",
             "out.pdf",
         ]);
         assert_eq!(r.args, ["in.html", "out.pdf"]);
-        assert_eq!(r.ignored, ["--cookie", "--outline"]);
+        assert_eq!(r.ignored, ["--cookie", "--disable-forms"]);
         assert_eq!(r.lossy, ["--zoom", "-d", "--viewport-size"]);
     }
 

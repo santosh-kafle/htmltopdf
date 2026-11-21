@@ -17,8 +17,9 @@ maintained, and accepts the same command line.
   `style=""` attributes and a built-in default stylesheet, with the full
   cascade (specificity, source order,
   `!important`, inheritance) and Selectors Level 4 matching (`:nth-child`,
-  `:not`, `:is`, attribute selectors, combinators). `@media print` rules
-  apply; `@media screen` rules do not. Supported properties:
+  `:not`, `:is`, attribute selectors, combinators, `::before` and
+  `::after`). `@media print` rules apply; `@media screen` rules do not.
+  Supported properties:
   - text: `color`, `font-family`, `font-size`, `font-weight`, `font-style`,
     `font`, `line-height`, `text-align`, `white-space`, `text-indent`,
     `text-transform`, `letter-spacing`, `word-spacing`, `vertical-align`
@@ -36,7 +37,10 @@ maintained, and accepts the same command line.
   - images: `width`, `height`, `max-width`, `max-height`, `vertical-align`
   - tables: `border-collapse`, `border-spacing`, `table-layout`,
     `vertical-align`, `height` on cells and rows
-  - lists: `list-style-type`
+  - lists: `list-style-type`, including `devanagari`
+  - generated content: `content` (strings, `counter()`, `counters()`,
+    `attr()`, quotes) on `::before` and `::after`, `counter-reset`,
+    `counter-increment`, `counter-set`
   - pages: `break-before`, `break-after`, `break-inside` (`page` and
     `avoid`) and the `page-break-*` aliases, `orphans`, `widows`
   - fonts: `@font-face` with TrueType, OpenType and WOFF files, loaded only
@@ -70,6 +74,10 @@ maintained, and accepts the same command line.
   and the PDF text can be searched and copied.
 - **Document metadata.** The `<title>` becomes the PDF title unless `--title`
   is given.
+- **Bookmarks and links.** Headings (`<h1>` to `<h6>`) become the PDF
+  outline, nested by level. `<a href>` links are clickable: links to other
+  documents open them, and links to an `id` or `<a name>` in the document
+  jump to it.
 - **wkhtmltopdf's command line.** Every documented wkhtmltopdf 0.12.6 option
   is recognised, so invocations from wrapper libraries such as `pdfkit`,
   `wicked_pdf` and `snappy` parse:
@@ -105,9 +113,14 @@ maintained, and accepts the same command line.
   outside the content, so give it room with `--margin-top` or
   `--margin-bottom`. These variables are replaced: `[page]`, `[topage]`,
   `[frompage]`, `[sitepage]`, `[sitepages]`, `[title]`, `[doctitle]`,
-  `[webpage]`, `[date]`, `[isodate]` and `[time]`, plus any set with
-  `--replace`. The text can be in any script, for example
+  `[webpage]`, `[date]`, `[isodate]`, `[time]`, and `[section]`,
+  `[subsection]` and `[subsubsection]` (the headings in effect on the
+  page), plus any set with `--replace`. The text can be in any script, for example
   `--footer-center "पृष्ठ [page] / [topage]"`.
+- **Outline and link options.** `--outline`, `--no-outline`,
+  `--outline-depth` (default 4), `--enable-external-links`,
+  `--disable-external-links`, `--enable-internal-links` and
+  `--disable-internal-links`.
 - **HTML headers and footers.** `--header-html` and `--footer-html` take a
   path or `file:` URL and draw that document in the top or bottom margin
   of every page. Without `--margin-top` (or `--margin-bottom`), the margin
@@ -117,9 +130,7 @@ maintained, and accepts the same command line.
   running it; see below.
 
 Not yet: SVG and CSS background images, WOFF2 fonts and `unicode-range`,
-floats and positioning, flexbox and grid, generated content (`::before`),
-the `[section]` header variables (always empty), and the table of
-contents.
+floats and positioning, flexbox and grid, and the table of contents.
 
 ## Usage
 

@@ -21,12 +21,12 @@ mod selector;
 pub mod stylesheet;
 pub mod values;
 
-pub use cascade::Stylist;
+pub use cascade::{Pseudo, Stylist};
 pub use computed::{BorderSide, ComputedStyle, DEFAULT_FONT_SIZE, TextDecorations, TextIndent};
 pub use properties::{
-    BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Display, FontFamilyName,
-    GenericFamily, LineHeight, ListStyleType, TableLayout, TextAlign, TextDecorationLine,
-    TextTransform, VerticalAlign, WhiteSpace,
+    BorderCollapse, BorderStyle, BoxSizing, Break, BreakInside, Content, ContentItem,
+    CounterChanges, Display, FontFamilyName, GenericFamily, LineHeight, ListStyleType, TableLayout,
+    TextAlign, TextDecorationLine, TextTransform, VerticalAlign, WhiteSpace,
 };
 pub use stylesheet::{PageRule, PageSizeValue};
 pub use values::{Color, ColorValue, Dimension, Length, Side, Sides};

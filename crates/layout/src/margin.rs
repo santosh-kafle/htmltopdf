@@ -105,7 +105,9 @@ impl Engine {
         let doc = Document::new();
         let styles = Stylist::new();
         let fetcher = Fetcher::data_only();
+        let generated = flow::generated::GeneratedContent::new();
         let mut cx = flow::Context {
+            generated: &generated,
             fonts: &mut self.fonts,
             generics: &self.generics,
             texts: &mut self.texts,
@@ -170,7 +172,9 @@ impl Engine {
         images: bool,
         fetcher: &Fetcher<'_>,
     ) -> MarginDocument {
+        let generated = flow::generated::resolve(doc, styles);
         let mut cx = flow::Context {
+            generated: &generated,
             fonts: &mut self.fonts,
             generics: &self.generics,
             texts: &mut self.texts,
@@ -196,6 +200,9 @@ impl Engine {
         let (body_top, body_bottom) = body.unwrap_or((0.0, height));
         let mut items = Vec::new();
         canvas.into_items(0.0, 0.0, &mut items);
+        // Headings and anchors in a header belong to no place in the
+        // document: they would repeat on every page.
+        items.retain(|item| !matches!(item, Item::Mark(_)));
         MarginDocument {
             items,
             body_top: body_top as f32,
@@ -268,7 +275,7 @@ mod tests {
                     let end = run.glyphs.iter().map(|g| g.text_range.end).max()?;
                     Some((run.text[start..end].to_owned(), run.origin.x, run.origin.y))
                 }
-                Item::Fill(_) | Item::Image(_) => None,
+                _ => None,
             })
             .collect()
     }
@@ -278,7 +285,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 Item::Fill(fill) => Some(fill.rect),
-                Item::Text(_) | Item::Image(_) => None,
+                _ => None,
             })
             .collect()
     }

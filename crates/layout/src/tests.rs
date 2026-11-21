@@ -1,6 +1,7 @@
 //! End-to-end layout tests: HTML in, positioned items out.
 
 use presswork_dom::parse_html;
+use presswork_dom::resource::Url;
 use presswork_style::Stylist;
 
 use super::*;
@@ -38,7 +39,7 @@ fn runs(page: &Page) -> Vec<&TextRun> {
         .iter()
         .filter_map(|item| match item {
             Item::Text(run) => Some(run),
-            Item::Fill(_) | Item::Image(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -48,7 +49,7 @@ fn fills(page: &Page) -> Vec<Fill> {
         .iter()
         .filter_map(|item| match item {
             Item::Fill(fill) => Some(*fill),
-            Item::Text(_) | Item::Image(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -1712,4 +1713,200 @@ fn inline_backgrounds_follow_raised_text() {
     assert!(approx(flat_text, 0.0));
     assert!(raised_text > 2.0, "{raised_text}");
     assert!(approx(raised_background - flat_background, raised_text));
+}
+
+/// The page's text, run by run, joined with spaces.
+fn page_text(page: &Page) -> String {
+    runs(page)
+        .iter()
+        .map(|run| run.covered_text())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+#[test]
+fn before_and_after_add_text_around_the_content() {
+    let pages = layout(
+        "<style>p::before { content: 'Total: ' } p::after { content: ' only'; color: red }</style>
+         <p>Rs. 500</p>",
+    );
+    let page = &pages[0];
+    assert_eq!(page_text(page), "Total: Rs. 500| only");
+    assert_eq!(run_with(page, "only").color, RED);
+}
+
+#[test]
+fn counters_number_headings_in_document_order() {
+    let pages = layout(
+        "<style>body { counter-reset: sec } h2 { counter-increment: sec; counter-reset: sub }
+         h3 { counter-increment: sub } h2::before { content: counter(sec) '. ' }
+         h3::before { content: counter(sec) '.' counter(sub) ' ' }
+         .hidden { display: none }</style>
+         <h2>A</h2><h3>a</h3><h3>b</h3><h2 class=hidden>X</h2><h2>B</h2><h3>c</h3>",
+    );
+    let text: Vec<&str> = words(&pages[0]);
+    assert_eq!(text, ["1. A", "1.1 a", "1.2 b", "2. B", "2.1 c"]);
+}
+
+#[test]
+fn nested_counters_and_counter_styles() {
+    let pages = layout(
+        "<style>ol { counter-reset: item; list-style: none }
+         li { counter-increment: item } li::before { content: counters(item, '.') ') ' }
+         .ne li::before { content: counter(item, devanagari) '. ' }</style>
+         <ol><li>One<ol><li>Sub</li></ol></li><li>Two</li></ol>
+         <ol class=ne><li>क</li><li>ख</li></ol>",
+    );
+    let text = words(&pages[0]);
+    assert_eq!(text[..3], ["1) One", "1.1) Sub", "2) Two"]);
+    // Devanagari digits and the full stop come from different fonts.
+    let joined: String = runs(&pages[0]).iter().map(|r| r.covered_text()).collect();
+    assert!(joined.ends_with("१. क२. ख"), "{joined}");
+}
+
+#[test]
+fn counters_in_measured_table_cells_count_once() {
+    // Cells are measured before they are laid out; the counter must not
+    // advance twice.
+    let pages = layout(
+        "<style>table { counter-reset: row } tr { counter-increment: row }
+         td.n::before { content: counter(row) }</style>
+         <table><tr><td class=n></td><td>a</td></tr><tr><td class=n></td><td>b</td></tr></table>",
+    );
+    assert_eq!(words(&pages[0]), ["1", "a", "2", "b"]);
+}
+
+#[test]
+fn quotes_attributes_and_block_pseudo_elements() {
+    let pages = layout(
+        "<style>a::after { content: ' (' attr(href) ')' }
+         div::before { content: 'NOTE'; display: block; background: red }</style>
+         <p><q>pay <q>now</q></q> <a href='https://x.test'>here</a></p><div>Body</div>",
+    );
+    let page = &pages[0];
+    let text = page_text(page);
+    assert!(
+        text.contains("\u{201C}pay \u{2018}now\u{2019}\u{201D}"),
+        "{text}"
+    );
+    assert!(text.contains("(https://x.test)"), "{text}");
+    let note = run_with(page, "NOTE");
+    let body = run_with(page, "Body");
+    assert!(note.origin.y < body.origin.y, "a block of its own");
+    let background = fills_of(page, RED)[0];
+    assert!(background.size.width > 100.0, "full width");
+}
+
+fn links(page: &Page) -> Vec<&Link> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Link(link) => Some(link),
+            _ => None,
+        })
+        .collect()
+}
+
+fn marks(pages: &[Page]) -> Vec<(usize, &Mark)> {
+    pages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| {
+            page.items.iter().filter_map(move |item| match item {
+                Item::Mark(mark) => Some((index, mark)),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn headings_and_anchors_are_marked_where_they_land() {
+    let pages = layout(
+        "<body style='margin:0'><h1 id=top>Tax   <b>Invoice</b></h1><p style='height:2000px'></p>
+         <h2>Terms</h2><p>Pay <a name=pay>here</a> <span id=late>soon</span>.</p>",
+    );
+    let marks = marks(&pages);
+    let kinds: Vec<(usize, &MarkKind)> = marks.iter().map(|(page, m)| (*page, &m.kind)).collect();
+    let anchor = |name: &str| MarkKind::Anchor(name.into());
+    let heading = |level, title: &str| MarkKind::Heading {
+        level,
+        title: title.into(),
+    };
+    let last = pages.len() - 1;
+    assert!(last > 0);
+    assert_eq!(
+        kinds,
+        [
+            (0, &anchor("top")),
+            (0, &heading(1, "Tax Invoice")),
+            (last, &heading(2, "Terms")),
+            (last, &anchor("pay")),
+            (last, &anchor("late")),
+        ]
+    );
+    let terms = run_with(&pages[last], "Terms");
+    let (_, mark) = marks[2];
+    assert!(mark.origin.y <= terms.origin.y && mark.origin.y > terms.origin.y - 20.0);
+}
+
+#[test]
+fn links_cover_their_text_on_each_line() {
+    let pages = layout(
+        "<body style='margin:0'><div style='width:80pt'>See <a href='#terms'>the payment
+         terms below</a> and <a href='https://example.com/a b'>this</a>.</div>",
+    );
+    let page = &pages[0];
+    let links = links(page);
+    let internal: Vec<&&Link> = links
+        .iter()
+        .filter(|l| l.target == LinkTarget::Anchor("terms".into()))
+        .collect();
+    assert!(internal.len() >= 2, "one per line: {links:?}");
+    let (left, _) = word_edges(page, "the");
+    assert!(approx(internal[0].rect.origin.x, left));
+    let (_, right) = word_edges(page, "below");
+    assert!(
+        internal
+            .iter()
+            .any(|l| approx(l.rect.origin.x + l.rect.size.width, right))
+    );
+    assert!(
+        links
+            .iter()
+            .any(|l| l.target == LinkTarget::Url("https://example.com/a%20b".into()))
+    );
+}
+
+#[test]
+fn link_targets_resolve_against_the_document() {
+    let base = Url::parse("file:///docs/invoice.html").unwrap();
+    let fetcher = Fetcher::new(&DataUrls, Some(base));
+    let html = "<p><a href='terms.html'>a</a> <a href='invoice.html#%E0%A4%95'>b</a>
+                <a href='javascript:void(0)'>c</a> <a href=''>d</a> <a>e</a>";
+    let pages = layout_fetching(
+        &mut Engine::new(),
+        html,
+        &LayoutOptions::default(),
+        &fetcher,
+    );
+    let targets: Vec<&LinkTarget> = links(&pages[0]).iter().map(|l| &l.target).collect();
+    assert_eq!(
+        targets,
+        [
+            &LinkTarget::Url("file:///docs/terms.html".into()),
+            &LinkTarget::Anchor("क".into()),
+            &LinkTarget::Url("file:///docs/invoice.html".into()),
+        ]
+    );
+}
+
+#[test]
+fn block_links_make_their_lines_clickable() {
+    let pages = layout(
+        "<body style='margin:0'><a href='#top' style='display:block; width:200pt'>Back to top</a>",
+    );
+    let links = links(&pages[0]);
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert!(approx(links[0].rect.size.width, 200.0));
 }
