@@ -21,7 +21,8 @@ maintained, and accepts the same command line.
   apply; `@media screen` rules do not. Supported properties:
   - text: `color`, `font-family`, `font-size`, `font-weight`, `font-style`,
     `font`, `line-height`, `text-align`, `white-space`, `text-indent`,
-    `text-transform`, `letter-spacing`, `word-spacing`
+    `text-transform`, `letter-spacing`, `word-spacing`, `vertical-align`
+    (`<sup>`, `<sub>` and the keyword values)
   - text decoration: `text-decoration` (underline, overline and
     line-through, drawn solid), `text-decoration-line`,
     `text-decoration-color`

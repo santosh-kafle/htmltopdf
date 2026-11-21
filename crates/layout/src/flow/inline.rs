@@ -1,12 +1,14 @@
 //! Inline layout: gathering text, shaping it and breaking it into lines.
 
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use parley::{
     Alignment, AlignmentOptions, FontStyle, FontWeight, GlyphRun, IndentOptions, InlineBox,
     InlineBoxKind, Language, Layout, LineBreakContext, LineHeight as ParleyLineHeight,
-    PositionedLayoutItem, StyleProperty, TextWrapMode, VerticalAlign as ParleyVerticalAlign,
+    PositionedLayoutItem, TextStyle, TextWrapMode, TreeBuilder,
+    VerticalAlign as ParleyVerticalAlign, WhiteSpaceCollapse,
 };
 use presswork_dom::{Document, NodeId};
 use presswork_style::{
@@ -42,8 +44,17 @@ impl Default for Ink {
 #[derive(Default)]
 pub(super) struct Inline {
     text: String,
-    spans: Vec<(Range<usize>, ComputedStyle)>,
+    spans: Vec<Span>,
     boxes: Vec<InlineObject>,
+    /// The style of each inline element entered, which parley needs as
+    /// the parent of the text inside: `vertical-align` is not inherited,
+    /// and shifts relative to the parent's font.
+    nesting: Vec<ComputedStyle>,
+    /// The inline elements now open, outermost first, with their index
+    /// in `nesting`.
+    open: Vec<(NodeId, usize)>,
+    /// The indices in `nesting` of `open`.
+    path: Rc<[usize]>,
     /// The paragraph starts its block container, so `text-indent`
     /// applies to it.
     first: bool,
@@ -60,6 +71,15 @@ pub(super) struct Inline {
     spacers: Vec<usize>,
 }
 
+/// A stretch of text in one style.
+struct Span {
+    range: Range<usize>,
+    style: ComputedStyle,
+    /// The inline elements it is in, as indices in [`Inline::nesting`],
+    /// outermost first.
+    path: Rc<[usize]>,
+}
+
 /// An inline element whose box is painted or takes horizontal space.
 ///
 /// Its left margin, border and padding are a spacer box (an empty inline
@@ -71,6 +91,8 @@ pub(super) struct Inline {
 struct InlineElement {
     node: NodeId,
     style: ComputedStyle,
+    /// The elements it is in, and itself.
+    path: Rc<[usize]>,
     /// From its start spacer (or first character) to the end of its end
     /// spacer (or last character). [`OPEN`] until started or ended: an
     /// element left open by a block inside it extends to the end.
@@ -203,10 +225,20 @@ impl Inline {
         self.push_span(start, style);
     }
 
-    /// Gives the text from `start` to the end the style `style`.
+    /// Gives the text from `start` to the end the style `style`, inside
+    /// the open elements.
     fn push_span(&mut self, start: usize, style: &ComputedStyle) {
+        let path = Rc::clone(&self.path);
+        self.push_span_in(start, style, path);
+    }
+
+    fn push_span_in(&mut self, start: usize, style: &ComputedStyle, path: Rc<[usize]>) {
         if self.text.len() > start {
-            self.spans.push((start..self.text.len(), style.clone()));
+            self.spans.push(Span {
+                range: start..self.text.len(),
+                style: style.clone(),
+                path,
+            });
         }
     }
 
@@ -226,10 +258,15 @@ impl Inline {
         }
     }
 
-    /// Starts an inline element with `style`, if it paints a box or takes
-    /// horizontal space; percentages are of `containing_width`. Its
-    /// content follows; [`Self::close_element`] ends it.
-    pub fn open_element(&mut self, node: NodeId, style: &ComputedStyle, containing_width: f32) {
+    /// Enters the inline element `node`; its content follows, and
+    /// [`Self::leave`] ends it. If it paints a box or takes horizontal
+    /// space, it is recorded for that; percentages are of
+    /// `containing_width`.
+    pub fn enter(&mut self, node: NodeId, style: &ComputedStyle, containing_width: f32) {
+        self.open.push((node, self.nesting.len()));
+        self.nesting.push(style.clone());
+        self.path = self.open.iter().map(|&(_, index)| index).collect();
+
         let paint = BoxPaint::from_style(style);
         let margin = style
             .margin
@@ -241,6 +278,7 @@ impl Inline {
         let element = InlineElement {
             node,
             style: style.clone(),
+            path: Rc::clone(&self.path),
             range: OPEN..OPEN,
             paint,
             margin,
@@ -254,10 +292,32 @@ impl Inline {
         self.elements.push(element);
     }
 
-    /// Ends the inline element `node`, if [`Self::open_element`] started
-    /// it in this paragraph: a block inside the element splits the
-    /// paragraph, and the part after the block is not painted.
-    pub fn close_element(&mut self, node: NodeId) {
+    /// Leaves the inline element `node`.
+    pub fn leave(&mut self, node: NodeId) {
+        self.close_element(node);
+        if self.open.last().is_some_and(|&(open, _)| open == node) {
+            self.open.pop();
+            self.path = self.open.iter().map(|&(_, index)| index).collect();
+        }
+    }
+
+    /// The content after a block inside the open inline elements: it
+    /// stays inside them for its style. Their boxes are not painted
+    /// around it.
+    pub fn continuation(&self) -> Inline {
+        let mut next = Inline::default();
+        for &(node, index) in &self.open {
+            next.open.push((node, next.nesting.len()));
+            next.nesting.push(self.nesting[index].clone());
+        }
+        next.path = next.open.iter().map(|&(_, index)| index).collect();
+        next
+    }
+
+    /// Ends the painted inline element `node`, if it was started in this
+    /// paragraph: a block inside the element splits the paragraph, and
+    /// the part after the block is not painted.
+    fn close_element(&mut self, node: NodeId) {
         let Some(index) = self.elements.iter().rposition(|e| e.node == node) else {
             return;
         };
@@ -271,12 +331,13 @@ impl Inline {
             // the spacer does not move to the next line without the text.
             let space = self.pop_collapsible_space();
             let style = self.elements[index].style.clone();
-            self.push_object(InlineObject::spacer(width), &style);
+            let path = Rc::clone(&self.elements[index].path);
+            self.push_object(InlineObject::spacer(width), &style, path);
             self.elements[index].range.end = self.text.len();
-            if let Some(style) = space {
+            if let Some(Span { style, path, .. }) = space {
                 let start = self.text.len();
                 self.text.push(' ');
-                self.push_span(start, &style);
+                self.push_span_in(start, &style, path);
             }
         } else {
             self.elements[index].range.end = self.text.len();
@@ -291,27 +352,32 @@ impl Inline {
             let width = self.elements[index].start_width();
             if width > 0.0 {
                 let style = self.elements[index].style.clone();
-                self.push_object(InlineObject::spacer(width), &style);
+                let path = Rc::clone(&self.elements[index].path);
+                self.push_object(InlineObject::spacer(width), &style, path);
             }
         }
     }
 
     /// Removes a collapsible space at the end of the text, returning its
-    /// style.
-    fn pop_collapsible_space(&mut self) -> Option<ComputedStyle> {
-        let (range, style) = self.spans.last()?;
+    /// style and elements.
+    fn pop_collapsible_space(&mut self) -> Option<Span> {
+        let last = self.spans.last()?;
         if !self.text.ends_with(' ')
-            || range.end != self.text.len()
-            || !style.white_space.collapses_spaces()
+            || last.range.end != self.text.len()
+            || !last.style.white_space.collapses_spaces()
         {
             return None;
         }
-        let style = style.clone();
+        let space = Span {
+            range: 0..0,
+            style: last.style.clone(),
+            path: Rc::clone(&last.path),
+        };
         self.text.pop();
         let end = self.text.len();
-        self.spans.retain_mut(|(range, _)| {
-            range.end = range.end.min(end);
-            range.start < range.end
+        self.spans.retain_mut(|span| {
+            span.range.end = span.range.end.min(end);
+            span.range.start < span.range.end
         });
         for element in &mut self.elements {
             if element.range.end != OPEN {
@@ -319,7 +385,7 @@ impl Inline {
                 element.range.end = element.range.end.min(end);
             }
         }
-        Some(style)
+        Some(space)
     }
 
     /// Applies `text-transform` to `text`, which follows the text gathered
@@ -350,24 +416,23 @@ impl Inline {
     pub fn push_break(&mut self, style: &ComputedStyle) {
         self.start_pending();
         self.push_newline();
-        let end = self.text.len();
-        self.spans.push((end - 1..end, style.clone()));
+        self.push_span(self.text.len() - 1, style);
     }
 
     /// Appends an atomic inline box. Spaces around it are kept.
     pub fn push_box(&mut self, object: InlineObject, style: &ComputedStyle) {
         self.start_pending();
-        self.push_object(object, style);
+        let path = Rc::clone(&self.path);
+        self.push_object(object, style, path);
     }
 
-    fn push_object(&mut self, mut object: InlineObject, style: &ComputedStyle) {
+    fn push_object(&mut self, mut object: InlineObject, style: &ComputedStyle, path: Rc<[usize]>) {
         object.index = self.text.len();
         if object.spacer {
             self.spacers.push(object.index);
         }
         self.text.push(OBJECT_REPLACEMENT);
-        self.spans
-            .push((object.index..self.text.len(), style.clone()));
+        self.push_span_in(object.index, style, path);
         self.boxes.push(object);
     }
 
@@ -377,11 +442,11 @@ impl Inline {
             && self
                 .spans
                 .last()
-                .is_none_or(|(_, style)| style.white_space.collapses_spaces())
+                .is_none_or(|span| span.style.white_space.collapses_spaces())
         {
             self.text.pop();
-            if let Some((range, _)) = self.spans.last_mut() {
-                range.end = range.end.min(self.text.len());
+            if let Some(span) = self.spans.last_mut() {
+                span.range.end = span.range.end.min(self.text.len());
             }
         }
         self.text.push('\n');
@@ -404,13 +469,14 @@ fn is_mark(ch: char) -> bool {
     matches!(ch as u32, 0x0300..=0x036F | 0x0900..=0x0903 | 0x093A..=0x094F | 0x0951..=0x0957 | 0x0962..=0x0963)
 }
 
-/// The parley style properties for text with the given computed style.
-fn text_properties<'a>(
+/// The parley style for text with the given computed style, aligned
+/// with its parent as `align` says.
+fn text_style<'a>(
     generics: &'a GenericFonts,
     web: &'a WebFonts<'_>,
     style: &'a ComputedStyle,
-) -> [StyleProperty<'a, Ink>; 10] {
-    let language = style.lang.as_deref().and_then(|l| Language::parse(l).ok());
+    align: ParleyVerticalAlign,
+) -> TextStyle<'a, 'static, Ink> {
     let line_height = match style.line_height {
         LineHeight::Normal => ParleyLineHeight::MetricsRelative(1.0),
         LineHeight::Number(factor) => ParleyLineHeight::FontSizeRelative(factor),
@@ -419,43 +485,51 @@ fn text_properties<'a>(
             ParleyLineHeight::Absolute(length.to_pt(style.font_size, style.root_font_size))
         }
     };
-    let wrap = if style.white_space.wraps() {
+    let text_wrap_mode = if style.white_space.wraps() {
         TextWrapMode::Wrap
     } else {
         TextWrapMode::NoWrap
     };
-    [
-        StyleProperty::FontFamily(generics.stack(web, &style.font_family)),
-        StyleProperty::FontSize(style.font_size),
-        StyleProperty::FontWeight(FontWeight::new(style.font_weight)),
-        StyleProperty::FontStyle(if style.italic {
+    TextStyle {
+        font_family: generics.stack(web, &style.font_family),
+        font_size: style.font_size,
+        font_weight: FontWeight::new(style.font_weight),
+        font_style: if style.italic {
             FontStyle::Italic
         } else {
             FontStyle::Normal
-        }),
-        StyleProperty::Locale(language),
-        StyleProperty::Brush(Ink {
+        },
+        locale: style.lang.as_deref().and_then(|l| Language::parse(l).ok()),
+        brush: Ink {
             color: style.color,
             decorations: style.text_decorations(),
-        }),
-        StyleProperty::LineHeight(line_height),
-        StyleProperty::TextWrapMode(wrap),
-        StyleProperty::LetterSpacing(style.letter_spacing),
-        StyleProperty::WordSpacing(style.word_spacing),
-    ]
+        },
+        line_height,
+        vertical_align: align,
+        text_wrap_mode,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+        // The text arrives with white space already processed.
+        white_space_collapse: WhiteSpaceCollapse::Preserve,
+        ..TextStyle::default()
+    }
 }
 
 impl Context<'_> {
     /// Shapes `text` into an unbroken parley layout. `style` is the block's
-    /// style; `spans` override it for stretches of the text.
+    /// style; `spans` override it for stretches of the text, inside the
+    /// inline elements whose styles are `nesting`.
     fn shape(
         &mut self,
         text: &str,
         style: &ComputedStyle,
-        spans: &[(Range<usize>, ComputedStyle)],
+        spans: &[Span],
+        nesting: &[ComputedStyle],
         boxes: &[InlineObject],
     ) -> Layout<Ink> {
-        let styles = std::iter::once(style).chain(spans.iter().map(|(_, span)| span));
+        let styles = std::iter::once(style)
+            .chain(spans.iter().map(|span| &span.style))
+            .chain(nesting);
         for style in styles {
             for family in style.font_family.iter() {
                 if let FontFamilyName::Named(name) = family {
@@ -464,30 +538,112 @@ impl Context<'_> {
             }
         }
 
-        let mut builder = self.texts.ranged_builder(self.fonts, text, 1.0, false);
+        let (generics, web) = (self.generics, &self.web_fonts);
+        let root = text_style(generics, web, style, ParleyVerticalAlign::BASELINE);
+        let mut builder = self.texts.tree_builder(self.fonts, 1.0, false, &root);
         if boxes.iter().any(|object| object.spacer) {
             builder.set_line_break_override(Some(&keep_objects_with_text));
         }
-        for property in text_properties(self.generics, &self.web_fonts, style) {
-            builder.push_default(property);
-        }
-        for (range, span) in spans {
-            for property in text_properties(self.generics, &self.web_fonts, span) {
-                builder.push(property, range.clone());
+        let mut pusher = TextPusher {
+            text,
+            boxes,
+            next_box: 0,
+            builder,
+        };
+        // Only elements that move their content off the baseline need a
+        // span of their own: they align it, against their parent span.
+        // Everything else is flat, like a browser's shaping, which runs
+        // across element boundaries when the style does not change.
+        let aligned = |element: &usize| nesting[*element].vertical_align != VerticalAlign::Baseline;
+        // The aligned elements whose spans are open in the builder, and
+        // the text style open inside them, if any.
+        let mut stack: Vec<usize> = Vec::new();
+        let mut leaf: Option<TextStyle<'_, 'static, Ink>> = None;
+        let mut cursor = 0;
+        for span in spans {
+            let range = span.range.start.max(cursor)..span.range.end;
+            if range.is_empty() {
+                continue;
             }
+            let path: Vec<usize> = span.path.iter().copied().filter(aligned).collect();
+            let style = text_style(generics, web, &span.style, ParleyVerticalAlign::BASELINE);
+            let contiguous = cursor == range.start;
+            if contiguous && stack == path && leaf.as_ref() == Some(&style) {
+                pusher.push(range.clone());
+                cursor = range.end;
+                continue;
+            }
+            if leaf.take().is_some() {
+                pusher.builder.pop_style_span();
+            }
+            if !contiguous {
+                for _ in stack.drain(..) {
+                    pusher.builder.pop_style_span();
+                }
+                pusher.push(cursor..range.start);
+            }
+            let common = stack.iter().zip(&path).take_while(|(a, b)| a == b).count();
+            for _ in stack.drain(common..) {
+                pusher.builder.pop_style_span();
+            }
+            for &element in &path[common..] {
+                let element_style = &nesting[element];
+                let align = vertical_align(element_style.vertical_align);
+                let parley_style = text_style(generics, web, element_style, align);
+                pusher.builder.push_style_span(parley_style);
+                stack.push(element);
+            }
+            // The text's own style, in line with the innermost element.
+            pusher.builder.push_style_span(style.clone());
+            leaf = Some(style);
+            pusher.push(range.clone());
+            cursor = range.end;
         }
-        for (id, object) in boxes.iter().enumerate() {
-            builder.push_inline_box(InlineBox {
-                id: id as u64,
-                kind: InlineBoxKind::InFlow,
-                index: object.index,
-                width: object.width,
-                height: object.height,
-                baseline: object.baseline,
-                vertical_align: vertical_align(object.vertical_align),
-            });
+        if leaf.is_some() {
+            pusher.builder.pop_style_span();
         }
-        builder.build(text)
+        for _ in stack.drain(..) {
+            pusher.builder.pop_style_span();
+        }
+        pusher.push(cursor..text.len());
+        let (layout, built) = pusher.builder.build();
+        debug_assert_eq!(built, text, "parley kept the text as given");
+        layout
+    }
+}
+
+/// Feeds a paragraph's text to parley's tree builder, turning the U+FFFC
+/// characters that stand for boxes into the boxes.
+struct TextPusher<'t, 'b> {
+    text: &'t str,
+    boxes: &'t [InlineObject],
+    next_box: usize,
+    builder: TreeBuilder<'b, Ink>,
+}
+
+impl TextPusher<'_, '_> {
+    fn push(&mut self, range: Range<usize>) {
+        let mut at = range.start;
+        while let Some(object) = self.boxes.get(self.next_box)
+            && object.index < range.end
+        {
+            if object.index >= at {
+                self.builder.push_text(&self.text[at..object.index]);
+                self.builder.push_inline_box(InlineBox {
+                    id: self.next_box as u64,
+                    kind: InlineBoxKind::InFlow,
+                    // Set by the builder, to where the text is now.
+                    index: 0,
+                    width: object.width,
+                    height: object.height,
+                    baseline: object.baseline,
+                    vertical_align: vertical_align(object.vertical_align),
+                });
+                at = object.index + OBJECT_REPLACEMENT.len_utf8();
+            }
+            self.next_box += 1;
+        }
+        self.builder.push_text(&self.text[at..range.end]);
     }
 }
 
@@ -500,7 +656,9 @@ impl Flow<'_, '_> {
         let text: Arc<str> = inline.text.into();
         let boxes = inline.boxes;
         let elements = inline.elements;
-        let mut layout = self.cx.shape(&text, style, &inline.spans, &boxes);
+        let mut layout = self
+            .cx
+            .shape(&text, style, &inline.spans, &inline.nesting, &boxes);
         if inline.first {
             let indent = style.text_indent;
             let amount = indent.length.resolve(width).unwrap_or(0.0);
@@ -562,7 +720,7 @@ impl Flow<'_, '_> {
                         };
                         let text_run = text_run(&run, origin, &text, &mut cursor);
                         if !elements.is_empty() {
-                            pieces.add_run(&run, &text_run);
+                            pieces.add_run(&run, &text_run, origin.y);
                         }
                         let decorations = run.style().brush.decorations;
                         if decorations.is_empty() {
@@ -641,7 +799,7 @@ impl Flow<'_, '_> {
             ..style.clone()
         };
         let text: Arc<str> = marker.into();
-        let mut layout = self.cx.shape(&text, &style, &[], &[]);
+        let mut layout = self.cx.shape(&text, &style, &[], &[], &[]);
         layout.break_all_lines(None);
         let gap = style.font_size * 0.4;
         let start = x - layout.width() - gap;
@@ -791,13 +949,13 @@ struct Piece {
 #[derive(Default)]
 struct LinePieces {
     pieces: Vec<Piece>,
-    /// Text range, primary-font ascent and descent, and font size of
-    /// each glyph run.
-    runs: Vec<(Range<usize>, f32, f32, f32)>,
+    /// Text range, primary-font ascent and descent, font size and
+    /// baseline (relative to the line's top) of each glyph run.
+    runs: Vec<(Range<usize>, f32, f32, f32, f32)>,
 }
 
 impl LinePieces {
-    fn add_run(&mut self, run: &GlyphRun<'_, Ink>, text_run: &TextRun) {
+    fn add_run(&mut self, run: &GlyphRun<'_, Ink>, text_run: &TextRun, baseline: f32) {
         let mut x = text_run.origin.x;
         let mut range: Option<Range<usize>> = None;
         for glyph in &text_run.glyphs {
@@ -819,7 +977,7 @@ impl LinePieces {
             let metrics = run.span_metrics();
             let font_size = run.run().font_size();
             self.runs
-                .push((range, metrics.ascent, metrics.descent, font_size));
+                .push((range, metrics.ascent, metrics.descent, font_size, baseline));
         }
     }
 
@@ -871,16 +1029,16 @@ impl LinePieces {
         }
 
         // The content area is the element's own font's ascent and
-        // descent; taken from its first text run on the line, scaled if
-        // that run is a descendant's of another size.
+        // descent around its baseline; taken from its first text run on
+        // the line, scaled if that run is a descendant's of another size.
         let font_size = element.style.font_size;
-        let run = self
+        let own = self
             .runs
             .iter()
-            .find(|(text, ..)| text.start < range.end && range.start < text.end)
-            .or(self.runs.first());
-        let (ascent, descent) = match run {
-            Some(&(_, ascent, descent, size)) if size > 0.0 => {
+            .find(|(text, ..)| text.start < range.end && range.start < text.end);
+        let baseline = own.map_or(baseline, |run| run.4);
+        let (ascent, descent) = match own.or(self.runs.first()) {
+            Some(&(_, ascent, descent, size, _)) if size > 0.0 => {
                 (ascent * font_size / size, descent * font_size / size)
             }
             _ => (font_size * 0.8, font_size * 0.2),
@@ -1191,8 +1349,8 @@ mod tests {
         inline.push_break(&style);
         inline.push_text(" two", &style);
         assert_eq!(inline.text, "one\ntwo");
-        for (range, _) in &inline.spans {
-            assert!(range.end <= inline.text.len() && range.start <= range.end);
+        for span in &inline.spans {
+            assert!(span.range.end <= inline.text.len() && span.range.start <= span.range.end);
         }
     }
 

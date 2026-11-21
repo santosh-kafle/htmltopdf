@@ -600,15 +600,16 @@ impl<'c, 'a> Flow<'c, 'a> {
                             self.inline_image(child, &child_style, width, inline);
                         }
                         Display::Inline => {
-                            inline.open_element(child, &child_style, width);
+                            inline.enter(child, &child_style, width);
                             self.children(child, &child_style, x, width, inline);
-                            inline.close_element(child);
+                            inline.leave(child);
                         }
                         Display::InlineBlock => {
                             self.inline_block(child, &child_style, width, inline);
                         }
                         _ => {
-                            self.paragraph(std::mem::take(inline), style, x, width);
+                            let rest = inline.continuation();
+                            self.paragraph(std::mem::replace(inline, rest), style, x, width);
                             self.block(child, &child_style, x, width);
                         }
                     }

@@ -1656,3 +1656,60 @@ fn inline_blocks_fit_a_cell_sized_to_them() {
         run_with(page, "PAID").origin.y
     ));
 }
+
+#[test]
+fn superscripts_and_subscripts_shift_off_the_baseline() {
+    let pages = layout("<body style='margin:0'><p>m<sup>2</sup> H<sub>3</sub>O");
+    let page = &pages[0];
+    let baseline = run_with(page, "m").origin.y;
+    let sup = run_with(page, "2");
+    let sub = run_with(page, "3");
+    assert!(sup.origin.y < baseline - 2.0, "{} {baseline}", sup.origin.y);
+    assert!(sub.origin.y > baseline + 1.0, "{} {baseline}", sub.origin.y);
+    assert!(sup.font_size < run_with(page, "m").font_size, "smaller");
+    assert!(approx(run_with(page, "O").origin.y, baseline));
+}
+
+#[test]
+fn text_nested_in_a_superscript_stays_raised() {
+    // vertical-align is not inherited: the bold text sits on the
+    // superscript's baseline, not the line's.
+    let pages = layout("<body style='margin:0'><p>x<sup>a<b>bold</b></sup> y");
+    let page = &pages[0];
+    let raised = run_with(page, "a").origin.y;
+    assert!(raised < run_with(page, "x").origin.y - 2.0);
+    assert!(approx(run_with(page, "bold").origin.y, raised));
+}
+
+#[test]
+fn text_runs_across_elements_that_do_not_change_its_style() {
+    let pages =
+        layout("<body style='margin:0'><p>a<span>b</span><em style='font-style:normal'>c</em>");
+    assert_eq!(words(&pages[0]), ["abc"]);
+}
+
+#[test]
+fn inline_backgrounds_follow_raised_text() {
+    let html = |align: &str| {
+        format!(
+            "<body style='margin:0'><p>x<span style='vertical-align:{align}'><span
+             style='background:red'>n</span></span>"
+        )
+    };
+    // Positions relative to the line's baseline: raised text makes the
+    // line taller.
+    let above_baseline = |pages: &[Page]| {
+        let page = &pages[0];
+        let baseline = runs(page)[0].origin.y;
+        let n = run_with(page, "n");
+        let n_x = n.origin.x + n.glyphs.iter().map(|g| g.advance).sum::<f32>();
+        let background = fills_of(page, RED)[0];
+        assert!(background.origin.x < n_x);
+        (baseline - n.origin.y, baseline - background.origin.y)
+    };
+    let (flat_text, flat_background) = above_baseline(&layout(&html("baseline")));
+    let (raised_text, raised_background) = above_baseline(&layout(&html("super")));
+    assert!(approx(flat_text, 0.0));
+    assert!(raised_text > 2.0, "{raised_text}");
+    assert!(approx(raised_background - flat_background, raised_text));
+}
